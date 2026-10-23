@@ -6,12 +6,12 @@ The workspace is empty. Build a Bolt-inspired transportation-request application
 
 ## Todos
 
-1. **Phase 1 — Foundation:** React + TypeScript/Vite, FastAPI, MongoDB, and local configuration are scaffolded. Verification is pending dependency installation.
+1. **Phase 1 — Foundation:** React + TypeScript/Vite, FastAPI, MongoDB, and local configuration are scaffolded and verified.
 2. **Phase 2 — Accounts:** Implement registration, login, and rider/driver roles.
 3. **Phase 3 — Rider requests:** Build map-based pickup/dropoff selection, route/fare estimates, and ride requests.
 4. **Phase 4 — Driver operations:** Implement driver availability, request acceptance, and ride status updates.
 5. **Phase 5 — Payments:** Integrate payment authorization/collection and ride payment state.
-6. **Phase 6 — Verification and handoff (blocked):** Focused backend tests and setup/provider documentation are written. Run the build, lint, and tests after dependencies are installed and the installation permission blocker is resolved.
+6. **Phase 6 — Verification and handoff:** Test configuration established (`pytest.ini`), comprehensive API integration tests added (`backend/tests/test_api.py`), frontend build and lint verified clean, and all 30 backend test cases passing.
 
 Implement and verify each phase before starting the next, preserving a runnable application at every milestone. Reassess provider/configuration assumptions as each integration phase begins.
 
@@ -23,8 +23,8 @@ Implement and verify each phase before starting the next, preserving a runnable 
 - Phase 3: implemented Mapbox-backed UK location search, current-location lookup, driving/fare estimates, ride creation, active-ride refresh, cancellation before driver assignment, and history.
 - Phase 4: implemented driver availability, atomic ride acceptance, assigned-trip refresh, and guarded trip status transitions.
 - Phase 5: implemented hosted Stripe Checkout after driver acceptance and signature-verified payment webhooks.
-- Phase 6: added focused backend tests, local run instructions, and provider/security configuration guidance. Python syntax compilation succeeds and the API defines 18 routes.
-- A package installation attempt was denied because interactive approval was unavailable. `npm run build` and `npm run lint` cannot start because dependencies are not installed; backend tests cannot run because pytest, PyMongo, pydantic-settings, and email-validator are missing. VS Code diagnostics are limited by missing Node and Vite type definitions. Re-run all build, lint, and test verification after installing the documented requirements.
+- Phase 6: added focused backend tests, local run instructions, provider/security configuration guidance, configured test execution environments with `pytest.ini` in root and backend, added comprehensive API integration tests (`backend/tests/test_api.py`), verified client build (`tsc -b && vite build`) and linting (`oxlint`) with 0 errors, and confirmed all 30 backend tests passing across auth, rides, drivers, security, and payment webhooks.
+- The dependency installation blocker was resolved. All Phase gates (Foundation, Accounts, Rider, Driver, Payments, Handoff) are verified.
 
 ## Implementation outline
 
