@@ -40,14 +40,79 @@ def utc_now() -> datetime:
     return datetime.now(timezone.utc)
 
 
-def public_user(user: dict) -> dict:
+TIER_CONFIG = {
+    "standard": {
+        "name": "Waygo",
+        "subtitle": "Everyday affordable rides",
+        "base": 2.50,
+        "per_km": 1.35,
+        "per_min": 0.18,
+        "seats": 4,
+        "eta_min": 3,
+        "multiplier": 1.0,
+    },
+    "comfort": {
+        "name": "Waygo Comfort",
+        "subtitle": "Spacious cars & top drivers",
+        "base": 3.50,
+        "per_km": 1.80,
+        "per_min": 0.25,
+        "seats": 4,
+        "eta_min": 5,
+        "multiplier": 1.35,
+    },
+    "xl": {
+        "name": "Waygo XL",
+        "subtitle": "Extra space for groups & bags",
+        "base": 4.50,
+        "per_km": 2.35,
+        "per_min": 0.30,
+        "seats": 6,
+        "eta_min": 6,
+        "multiplier": 1.75,
+    },
+    "green": {
+        "name": "Waygo Green",
+        "subtitle": "Hybrid & electric rides",
+        "base": 2.80,
+        "per_km": 1.45,
+        "per_min": 0.20,
+        "seats": 4,
+        "eta_min": 4,
+        "multiplier": 1.15,
+    },
+}
+
+
+def calculate_tier_fare(tier_key: str, distance_km: float, duration_min: int) -> dict:
+    cfg = TIER_CONFIG.get(tier_key, TIER_CONFIG["standard"])
+    fare = round(cfg["base"] + distance_km * cfg["per_km"] + duration_min * cfg["per_min"], 2)
     return {
+        "tier": tier_key,
+        "name": cfg["name"],
+        "subtitle": cfg["subtitle"],
+        "seats": cfg["seats"],
+        "eta_min": cfg["eta_min"],
+        "fare": fare,
+        "base_fare": cfg["base"],
+        "distance_rate": cfg["per_km"],
+        "time_rate": cfg["per_min"],
+    }
+
+
+def public_user(user: dict) -> dict:
+    data = {
         "id": user["id"],
         "name": user["name"],
         "email": user["email"],
         "role": user["role"],
         "available": user.get("available", False),
     }
+    if user.get("role") == "driver":
+        data["vehicle"] = user.get("vehicle")
+        data["rating_avg"] = user.get("rating_avg", 5.0)
+        data["rating_count"] = user.get("rating_count", 0)
+    return data
 
 
 def password_hash(password: str, salt: bytes | None = None) -> str:
@@ -116,9 +181,21 @@ class Credentials(BaseModel):
     password: str = Field(min_length=8, max_length=128)
 
 
+class VehicleInfo(BaseModel):
+    make: str = Field(min_length=1, max_length=50)
+    model: str = Field(min_length=1, max_length=50)
+    color: str = Field(min_length=1, max_length=30)
+    license_plate: str = Field(min_length=2, max_length=20)
+
+
 class Registration(Credentials):
     name: str = Field(min_length=2, max_length=80)
     role: Literal["rider", "driver"] = "rider"
+    vehicle: VehicleInfo | None = None
+
+
+class VehicleUpdate(BaseModel):
+    vehicle: VehicleInfo
 
 
 class Place(BaseModel):
@@ -131,6 +208,7 @@ class Place(BaseModel):
 class RideRequest(BaseModel):
     pickup: Place
     dropoff: Place
+    tier: Literal["standard", "comfort", "xl", "green"] = "standard"
 
 
 class AvailabilityUpdate(BaseModel):
@@ -139,6 +217,15 @@ class AvailabilityUpdate(BaseModel):
 
 class StatusUpdate(BaseModel):
     status: Literal["arriving", "in_progress", "completed"]
+
+
+class RatingSubmission(BaseModel):
+    rating: int = Field(ge=1, le=5)
+    feedback: str | None = Field(default=None, max_length=200)
+
+
+class DriverDecline(BaseModel):
+    reason: str | None = Field(default=None, max_length=200)
 
 
 class RouteEstimate(BaseModel):
@@ -198,10 +285,18 @@ async def get_route(pickup: Place, dropoff: Place) -> dict:
     distance_km = round(route["distance"] / 1000, 1)
     duration_min = max(1, round(route["duration"] / 60))
     fare = round(2.5 + distance_km * 1.35 + duration_min * 0.18, 2)
-    return {"distance_km": distance_km, "duration_min": duration_min, "fare": fare}
+    tiers = {key: calculate_tier_fare(key, distance_km, duration_min) for key in TIER_CONFIG}
+    return {
+        "distance_km": distance_km,
+        "duration_min": duration_min,
+        "fare": fare,
+        "tiers": tiers,
+    }
 
 
 def ride_response(ride: dict, driver: dict | None = None) -> dict:
+    tier_key = ride.get("tier", "standard")
+    cfg = TIER_CONFIG.get(tier_key, TIER_CONFIG["standard"])
     result = {
         "id": ride["id"],
         "pickup": ride["pickup"],
@@ -209,12 +304,28 @@ def ride_response(ride: dict, driver: dict | None = None) -> dict:
         "fare": ride["fare"],
         "distance_km": ride["distance_km"],
         "duration_min": ride["duration_min"],
+        "tier": tier_key,
+        "tier_name": ride.get("tier_name", cfg["name"]),
         "status": ride["status"],
         "payment_status": ride.get("payment_status", "pending"),
         "created_at": ride["created_at"].isoformat() if ride.get("created_at") else None,
+        "rating": ride.get("rating"),
+        "feedback": ride.get("feedback"),
+        "itemized_fare": {
+            "base_fare": cfg["base"],
+            "distance_km": ride["distance_km"],
+            "distance_rate": cfg["per_km"],
+            "duration_min": ride["duration_min"],
+            "time_rate": cfg["per_min"],
+            "total": ride["fare"],
+        },
     }
     if driver:
         result["driver_name"] = driver["name"]
+        result["driver_rating"] = driver.get("rating_avg", 5.0)
+        result["driver_trips"] = driver.get("rating_count", 0)
+        if driver.get("vehicle"):
+            result["vehicle"] = driver["vehicle"]
     return result
 
 
@@ -362,8 +473,13 @@ async def register(payload: Registration, request: Request):
         "role": payload.role,
         "password_hash": await run_in_threadpool(password_hash, payload.password),
         "available": False,
+        "rating_avg": 5.0,
+        "rating_count": 0,
+        "rating_sum": 0,
         "created_at": utc_now(),
     }
+    if payload.role == "driver" and payload.vehicle:
+        user["vehicle"] = payload.vehicle.model_dump()
     try:
         await db.users.insert_one(user)
     except Exception as exc:
@@ -462,14 +578,30 @@ async def request_ride(
     })
     if active:
         raise HTTPException(status_code=409, detail="Finish your current ride before requesting another.")
+    tier = payload.tier
     estimate = await get_route(payload.pickup, payload.dropoff)
+    if "tiers" in estimate and tier in estimate["tiers"]:
+        fare = estimate["tiers"][tier]["fare"]
+        tier_name = estimate["tiers"][tier]["name"]
+    elif tier == "standard" and "fare" in estimate:
+        fare = estimate["fare"]
+        tier_name = TIER_CONFIG["standard"]["name"]
+    else:
+        tier_info = calculate_tier_fare(tier, estimate.get("distance_km", 0), estimate.get("duration_min", 0))
+        fare = tier_info["fare"]
+        tier_name = tier_info["name"]
+
     ride = {
         "id": str(uuid4()),
         "rider_id": user["id"],
         "driver_id": None,
         "pickup": payload.pickup.model_dump(),
         "dropoff": payload.dropoff.model_dump(),
-        **estimate,
+        "distance_km": estimate["distance_km"],
+        "duration_min": estimate["duration_min"],
+        "fare": fare,
+        "tier": tier,
+        "tier_name": tier_name,
         "status": "requested",
         "payment_status": "pending",
         "checkout_url": None,
@@ -509,6 +641,20 @@ async def update_availability(
     return public_user(user)
 
 
+@app.patch("/api/drivers/vehicle")
+async def update_vehicle(
+    payload: VehicleUpdate,
+    request: Request,
+    user: dict = Depends(require_role("driver")),
+):
+    await request.app.state.db.users.update_one(
+        {"id": user["id"]},
+        {"$set": {"vehicle": payload.vehicle.model_dump()}},
+    )
+    user["vehicle"] = payload.vehicle.model_dump()
+    return public_user(user)
+
+
 @app.post("/api/rides/{ride_id}/accept")
 async def accept_ride(ride_id: str, request: Request, user: dict = Depends(require_role("driver"))):
     if not user.get("available"):
@@ -522,6 +668,35 @@ async def accept_ride(ride_id: str, request: Request, user: dict = Depends(requi
     if not ride:
         raise HTTPException(status_code=409, detail="This trip is no longer available.")
     return ride_response(ride, user)
+
+
+@app.post("/api/rides/{ride_id}/decline")
+async def decline_ride(
+    ride_id: str,
+    request: Request,
+    payload: DriverDecline = DriverDecline(),
+    user: dict = Depends(require_role("driver")),
+):
+    db = request.app.state.db
+    ride = await db.rides.find_one_and_update(
+        {"id": ride_id, "driver_id": user["id"], "status": "accepted"},
+        {
+            "$set": {
+                "status": "requested",
+                "driver_id": None,
+                "declined_by": user["id"],
+                "decline_reason": payload.reason,
+                "updated_at": utc_now(),
+            }
+        },
+        return_document=ReturnDocument.AFTER,
+    )
+    if not ride:
+        raise HTTPException(
+            status_code=409,
+            detail="Only newly accepted trips can be declined before heading to pickup.",
+        )
+    return ride_response(ride)
 
 
 @app.post("/api/rides/{ride_id}/cancel")
@@ -585,7 +760,10 @@ async def ride_history(request: Request, user: dict = Depends(current_user)):
     driver_ids = list({ride["driver_id"] for ride in rides if ride.get("driver_id")})
     drivers = {}
     if driver_ids:
-        cursor = request.app.state.db.users.find({"id": {"$in": driver_ids}}, {"id": 1, "name": 1})
+        cursor = request.app.state.db.users.find(
+            {"id": {"$in": driver_ids}},
+            {"id": 1, "name": 1, "vehicle": 1, "rating_avg": 1, "rating_count": 1},
+        )
         drivers = {driver["id"]: driver async for driver in cursor}
     return [ride_response(ride, drivers.get(ride.get("driver_id"))) for ride in rides]
 
@@ -600,6 +778,56 @@ async def get_ride(ride_id: str, request: Request, user: dict = Depends(current_
         raise HTTPException(status_code=404, detail="Ride not found.")
     driver = await request.app.state.db.users.find_one({"id": ride["driver_id"]}) if ride.get("driver_id") else None
     return ride_response(ride, driver)
+
+
+@app.post("/api/rides/{ride_id}/rate")
+async def rate_ride(
+    ride_id: str,
+    payload: RatingSubmission,
+    request: Request,
+    user: dict = Depends(require_role("rider")),
+):
+    db = request.app.state.db
+    ride = await db.rides.find_one({"id": ride_id, "rider_id": user["id"]})
+    if not ride:
+        raise HTTPException(status_code=404, detail="Ride not found.")
+    if ride.get("status") != "completed" or ride.get("payment_status") != "paid":
+        raise HTTPException(status_code=409, detail="Only completed and paid rides can be rated.")
+    if ride.get("rating") is not None:
+        raise HTTPException(status_code=409, detail="This ride has already been rated.")
+
+    await db.rides.update_one(
+        {"id": ride_id},
+        {
+            "$set": {
+                "rating": payload.rating,
+                "feedback": payload.feedback,
+                "rated_at": utc_now(),
+            }
+        },
+    )
+
+    driver_id = ride.get("driver_id")
+    if driver_id:
+        driver = await db.users.find_one({"id": driver_id})
+        if driver:
+            new_count = driver.get("rating_count", 0) + 1
+            new_sum = driver.get("rating_sum", 0) + payload.rating
+            new_avg = round(new_sum / new_count, 1)
+            await db.users.update_one(
+                {"id": driver_id},
+                {
+                    "$set": {
+                        "rating_count": new_count,
+                        "rating_sum": new_sum,
+                        "rating_avg": new_avg,
+                    }
+                },
+            )
+
+    updated_ride = await db.rides.find_one({"id": ride_id})
+    driver_doc = await db.users.find_one({"id": driver_id}) if driver_id else None
+    return ride_response(updated_ride, driver_doc)
 
 
 @app.post("/api/rides/{ride_id}/checkout")

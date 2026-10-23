@@ -6,11 +6,73 @@ const API_URL = import.meta.env.VITE_API_URL ?? 'http://localhost:8000'
 const MAPBOX_TOKEN = import.meta.env.VITE_MAPBOX_TOKEN
 
 type RideStatus = 'requested' | 'accepted' | 'arriving' | 'in_progress' | 'completed' | 'cancelled'
-type Profile = { id: string; name: string; email: string; role: 'rider' | 'driver'; available?: boolean }
-type Place = { name: string; address: string; latitude: number; longitude: number }
+type TierKey = 'standard' | 'comfort' | 'xl' | 'green'
+
+type VehicleInfo = {
+  make: string
+  model: string
+  color: string
+  license_plate: string
+}
+
+type Profile = {
+  id: string
+  name: string
+  email: string
+  role: 'rider' | 'driver'
+  available?: boolean
+  vehicle?: VehicleInfo
+  rating_avg?: number
+  rating_count?: number
+}
+
+type Place = {
+  name: string
+  address: string
+  latitude: number
+  longitude: number
+}
+
+type TierEstimate = {
+  tier: TierKey
+  name: string
+  subtitle: string
+  seats: number
+  eta_min: number
+  fare: number
+  base_fare: number
+  distance_rate: number
+  time_rate: number
+}
+
+type ItemizedFare = {
+  base_fare: number
+  distance_km: number
+  distance_rate: number
+  duration_min: number
+  time_rate: number
+  total: number
+}
+
 type Ride = {
-  id: string; pickup: Place; dropoff: Place; fare: number; distance_km: number
-  duration_min: number; status: RideStatus; driver_name?: string; payment_status: string; created_at?: string
+  id: string
+  pickup: Place
+  dropoff: Place
+  fare: number
+  distance_km: number
+  duration_min: number
+  tier?: TierKey
+  tier_name?: string
+  status: RideStatus
+  driver_name?: string
+  driver_rating?: number
+  driver_trips?: number
+  vehicle?: VehicleInfo
+  payment_status: string
+  created_at?: string
+  rating?: number
+  feedback?: string
+  itemized_fare?: ItemizedFare
 }
 
 async function request<T>(path: string, token?: string, options: RequestInit = {}): Promise<T> {
@@ -41,8 +103,28 @@ function Icon({ name, size = 19 }: { name: string; size?: number }) {
     search: <><circle cx="11" cy="11" r="7" /><path d="m20 20-4-4" /></>,
     steering: <><circle cx="12" cy="12" r="9" /><circle cx="12" cy="12" r="2" /><path d="m4 8 6 3m10-3-6 3m-2 3v7" /></>,
     wallet: <><rect x="3" y="5" width="18" height="15" rx="2" /><path d="M3 9h18m-5 5h2" /><path d="M5 5V4a2 2 0 0 1 2-2h10" /></>,
+    star: <polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2" />,
+    leaf: <><path d="M11 20A7 7 0 0 1 9.8 6.1C15.5 5 17 4.48 19 2c1 2 2 4.18 2 8 0 5.5-4.78 10-10 10Z" /><path d="M2 21c0-3 1.85-5.36 5.08-6C9.5 14.52 12 13 13 12" /></>,
+    shield: <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" />,
+    users: <><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2" /><circle cx="9" cy="7" r="4" /><path d="M22 21v-2a4 4 0 0 0-3-3.87" /><path d="M16 3.13a4 4 0 0 1 0 7.75" /></>,
+    receipt: <><path d="M4 2v20l2-1 2 1 2-1 2 1 2-1 2 1 2-1 2 1V2l-2 1-2-1-2 1-2-1-2 1-2-1-2 1-2-1Z" /><path d="M14 8H8" /><path d="M16 12H8" /><path d="M13 16H8" /></>,
+    close: <><line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" /></>,
   }
-  return <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">{paths[name] ?? paths.brand}</svg>
+  return (
+    <svg
+      width={size}
+      height={size}
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.7"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+    >
+      {paths[name] ?? paths.brand}
+    </svg>
+  )
 }
 
 function MapArt({ route = false, places }: { route?: boolean; places?: { pickup?: Place; dropoff?: Place } }) {
@@ -77,14 +159,18 @@ function AuthScreen({ onLogin }: { onLogin: (token: string, profile: Profile) =>
 
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault()
-    setBusy(true); setError('')
+    setBusy(true)
+    setError('')
     try {
       const result = mode === 'register'
         ? await request<{ access_token: string; user: Profile }>('/api/auth/register', undefined, { method: 'POST', body: JSON.stringify({ name, email, password, role }) })
         : await request<{ access_token: string; user: Profile }>('/api/auth/login', undefined, { method: 'POST', body: JSON.stringify({ email, password }) })
       onLogin(result.access_token, result.user)
-    } catch (issue) { setError(issue instanceof Error ? issue.message : 'Unable to sign in.') }
-    finally { setBusy(false) }
+    } catch (issue) {
+      setError(issue instanceof Error ? issue.message : 'Unable to sign in.')
+    } finally {
+      setBusy(false)
+    }
   }
 
   return (
@@ -101,7 +187,16 @@ function AuthScreen({ onLogin }: { onLogin: (token: string, profile: Profile) =>
           <span className="eyebrow muted">{mode === 'login' ? 'WELCOME BACK' : 'FIRST THINGS FIRST'}</span>
           <h2>{mode === 'login' ? 'Let’s get you there.' : 'Your next ride starts here.'}</h2>
           <p className="auth-subtitle">{mode === 'login' ? 'Sign in to pick up where you left off.' : 'Create an account and get moving.'}</p>
-          {mode === 'register' && <><label>Your name<input value={name} onChange={e => setName(e.target.value)} autoComplete="name" placeholder="Alex Morgan" required /></label><fieldset className="role-select"><legend>I’m joining as</legend><button type="button" className={role === 'rider' ? 'role-choice selected' : 'role-choice'} onClick={() => setRole('rider')}><Icon name="user" /> Rider</button><button type="button" className={role === 'driver' ? 'role-choice selected' : 'role-choice'} onClick={() => setRole('driver')}><Icon name="steering" /> Driver</button></fieldset></>}
+          {mode === 'register' && (
+            <>
+              <label>Your name<input value={name} onChange={e => setName(e.target.value)} autoComplete="name" placeholder="Alex Morgan" required /></label>
+              <fieldset className="role-select">
+                <legend>I’m joining as</legend>
+                <button type="button" className={role === 'rider' ? 'role-choice selected' : 'role-choice'} onClick={() => setRole('rider')}><Icon name="user" /> Rider</button>
+                <button type="button" className={role === 'driver' ? 'role-choice selected' : 'role-choice'} onClick={() => setRole('driver')}><Icon name="steering" /> Driver</button>
+              </fieldset>
+            </>
+          )}
           <label>Email address<input type="email" value={email} onChange={e => setEmail(e.target.value)} autoComplete="email" placeholder="you@example.com" required /></label>
           <label>Password<input type="password" value={password} onChange={e => setPassword(e.target.value)} autoComplete={mode === 'login' ? 'current-password' : 'new-password'} placeholder="At least 8 characters" minLength={8} required /></label>
           {error && <p className="form-error">{error}</p>}
@@ -120,7 +215,13 @@ function App() {
   const [pickup, setPickup] = useState('')
   const [dropoff, setDropoff] = useState('')
   const [ride, setRide] = useState<Ride | null>(null)
-  const [estimate, setEstimate] = useState<{ distance_km: number; duration_min: number; fare: number } | null>(null)
+  const [estimate, setEstimate] = useState<{
+    distance_km: number
+    duration_min: number
+    fare: number
+    tiers?: Record<TierKey, TierEstimate>
+  } | null>(null)
+  const [selectedTier, setSelectedTier] = useState<TierKey>('standard')
   const [places, setPlaces] = useState<{ pickup?: Place; dropoff?: Place }>({})
   const [suggestions, setSuggestions] = useState<{ field: 'pickup' | 'dropoff'; options: Place[] } | null>(null)
   const [openRides, setOpenRides] = useState<Ride[]>([])
@@ -132,15 +233,23 @@ function App() {
   const [paymentUrl, setPaymentUrl] = useState('')
   const [checkoutFailedRideId, setCheckoutFailedRideId] = useState('')
   const [checkoutRetryCount, setCheckoutRetryCount] = useState(0)
+  const [selectedReceiptRide, setSelectedReceiptRide] = useState<Ride | null>(null)
+  const [showVehicleEdit, setShowVehicleEdit] = useState(false)
+
   const checkoutAttempted = useRef(new Set<string>())
   const searchTimer = useRef<number | null>(null)
   const searchVersion = useRef(0)
   const rideRefreshVersion = useRef(0)
 
   function logout() {
-    localStorage.removeItem('waygo_token'); setToken(''); setProfile(null); setRide(null)
+    localStorage.removeItem('waygo_token')
+    setToken('')
+    setProfile(null)
+    setRide(null)
     rideRefreshVersion.current++
-    checkoutAttempted.current.clear(); setCheckoutFailedRideId(''); setPaymentUrl('')
+    checkoutAttempted.current.clear()
+    setCheckoutFailedRideId('')
+    setPaymentUrl('')
   }
 
   useEffect(() => {
@@ -196,7 +305,14 @@ function App() {
   }, [profile, token])
 
   useEffect(() => {
-    if (!profile || profile.role !== 'rider' || !ride || !['accepted', 'arriving', 'in_progress', 'completed'].includes(ride.status) || ride.payment_status === 'paid' || checkoutAttempted.current.has(ride.id)) return
+    if (
+      !profile ||
+      profile.role !== 'rider' ||
+      !ride ||
+      !['accepted', 'arriving', 'in_progress', 'completed'].includes(ride.status) ||
+      ride.payment_status === 'paid' ||
+      checkoutAttempted.current.has(ride.id)
+    ) return
     checkoutAttempted.current.add(ride.id)
     setCheckoutFailedRideId('')
     request<{ url: string }>(`/api/rides/${ride.id}/checkout`, token, { method: 'POST' })
@@ -215,7 +331,9 @@ function App() {
   }, [notice])
 
   function login(accessToken: string, user: Profile) {
-    localStorage.setItem('waygo_token', accessToken); setToken(accessToken); setProfile(user)
+    localStorage.setItem('waygo_token', accessToken)
+    setToken(accessToken)
+    setProfile(user)
   }
 
   function retryCheckout(rideId: string) {
@@ -243,13 +361,28 @@ function App() {
   }
 
   async function getEstimate() {
-    if (!places.pickup || !places.dropoff) { setNotice('Choose pickup and destination from the location results first.'); return }
-    setBusy(true); setNotice('')
+    if (!places.pickup || !places.dropoff) {
+      setNotice('Choose pickup and destination from the location results first.')
+      return
+    }
+    setBusy(true)
+    setNotice('')
     try {
-      const result = await request<{ distance_km: number; duration_min: number; fare: number }>('/api/maps/route', token, { method: 'POST', body: JSON.stringify({ pickup: places.pickup, dropoff: places.dropoff }) })
+      const result = await request<{
+        distance_km: number
+        duration_min: number
+        fare: number
+        tiers?: Record<TierKey, TierEstimate>
+      }>('/api/maps/route', token, {
+        method: 'POST',
+        body: JSON.stringify({ pickup: places.pickup, dropoff: places.dropoff }),
+      })
       setEstimate(result)
-    } catch (error) { setNotice(error instanceof Error ? error.message : 'Could not get a route.') }
-    finally { setBusy(false) }
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : 'Could not get a route.')
+    } finally {
+      setBusy(false)
+    }
   }
 
   function choosePlace(field: 'pickup' | 'dropoff', place: Place) {
@@ -263,119 +396,944 @@ function App() {
 
   function locatePickup() {
     if (!navigator.geolocation) { setNotice('Location access is not available in this browser.'); return }
-    navigator.geolocation.getCurrentPosition(async position => {
-      try {
-        const params = new URLSearchParams({ longitude: String(position.coords.longitude), latitude: String(position.coords.latitude) })
-        const place = await request<Place>(`/api/maps/reverse?${params}`, token)
-        choosePlace('pickup', place)
-        setNotice('Pickup set to your current location.')
-      } catch (error) { setNotice(error instanceof Error ? error.message : 'Could not look up your location.') }
-    }, error => setNotice(error.code === error.PERMISSION_DENIED ? 'Allow location access in your browser to use your current location.' : 'Your current location is not available.'), { enableHighAccuracy: false, timeout: 10000 })
+    navigator.geolocation.getCurrentPosition(
+      async position => {
+        try {
+          const params = new URLSearchParams({ longitude: String(position.coords.longitude), latitude: String(position.coords.latitude) })
+          const place = await request<Place>(`/api/maps/reverse?${params}`, token)
+          choosePlace('pickup', place)
+          setNotice('Pickup set to your current location.')
+        } catch (error) {
+          setNotice(error instanceof Error ? error.message : 'Could not look up your location.')
+        }
+      },
+      error => setNotice(error.code === error.PERMISSION_DENIED ? 'Allow location access in your browser to use your current location.' : 'Your current location is not available.'),
+      { enableHighAccuracy: false, timeout: 10000 }
+    )
   }
 
   async function bookRide() {
     if (!places.pickup || !places.dropoff) return
-    setBusy(true); setNotice('')
+    setBusy(true)
+    setNotice('')
     try {
-      const result = await request<{ ride: Ride; checkout_url?: string }>('/api/rides', token, { method: 'POST', body: JSON.stringify({ pickup: places.pickup, dropoff: places.dropoff }) })
+      const result = await request<{ ride: Ride; checkout_url?: string }>('/api/rides', token, {
+        method: 'POST',
+        body: JSON.stringify({
+          pickup: places.pickup,
+          dropoff: places.dropoff,
+          tier: selectedTier,
+        }),
+      })
       rideRefreshVersion.current++
       setRide(result.ride)
       setNotice('Ride requested. You’ll be able to pay securely after a driver accepts.')
-    } catch (error) { setNotice(error instanceof Error ? error.message : 'Ride request failed.') }
-    finally { setBusy(false) }
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : 'Ride request failed.')
+    } finally {
+      setBusy(false)
+    }
   }
 
   async function cancelRide(id: string) {
-    setBusy(true); setNotice('')
+    setBusy(true)
+    setNotice('')
     try {
       await request(`/api/rides/${id}/cancel`, token, { method: 'POST' })
       rideRefreshVersion.current++
-      setRide(null); setPaymentUrl('')
+      setRide(null)
+      setPaymentUrl('')
       setNotice('Your unassigned ride request was cancelled.')
-    } catch (error) { setNotice(error instanceof Error ? error.message : 'Could not cancel the ride request.') }
-    finally { setBusy(false) }
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : 'Could not cancel the ride request.')
+    } finally {
+      setBusy(false)
+    }
   }
 
   async function driverAction(path: string, method: string, body?: object) {
-    setBusy(true); setNotice('')
+    setBusy(true)
+    setNotice('')
     try {
       const result = await request<Ride>(path, token, { method, ...(body ? { body: JSON.stringify(body) } : {}) })
       setRide(result)
-      setOpenRides(current => result.status === 'completed' || result.status === 'cancelled'
-        ? current.filter(item => item.id !== result.id)
-        : [result, ...current.filter(item => item.id !== result.id)])
-    } catch (error) { setNotice(error instanceof Error ? error.message : 'Could not update the ride.') }
-    finally { setBusy(false) }
+      setOpenRides(current =>
+        result.status === 'completed' || result.status === 'cancelled'
+          ? current.filter(item => item.id !== result.id)
+          : [result, ...current.filter(item => item.id !== result.id)]
+      )
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : 'Could not update the ride.')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  async function declineRide(rideId: string) {
+    setBusy(true)
+    setNotice('')
+    try {
+      await request(`/api/rides/${rideId}/decline`, token, { method: 'POST' })
+      setOpenRides(current => current.filter(item => item.id !== rideId))
+      setNotice('Trip declined and returned to open requests.')
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : 'Could not decline trip.')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  async function updateVehicle(vehicle: VehicleInfo) {
+    setBusy(true)
+    setNotice('')
+    try {
+      const updated = await request<Profile>('/api/drivers/vehicle', token, {
+        method: 'PATCH',
+        body: JSON.stringify({ vehicle }),
+      })
+      setProfile(updated)
+      setShowVehicleEdit(false)
+      setNotice('Vehicle details updated.')
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : 'Could not update vehicle details.')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  async function submitRating(rideId: string, rating: number, feedback?: string) {
+    setBusy(true)
+    setNotice('')
+    try {
+      const updated = await request<Ride>(`/api/rides/${rideId}/rate`, token, {
+        method: 'POST',
+        body: JSON.stringify({ rating, feedback }),
+      })
+      setRide(updated)
+      setNotice('Thank you! Your rating has been shared.')
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : 'Could not submit rating.')
+    } finally {
+      setBusy(false)
+    }
   }
 
   async function showActivity() {
     setActiveTab('activity')
     setHistoryBusy(true)
-    try { setHistory(await request<Ride[]>('/api/rides/history', token)) }
-    catch (error) { setNotice(error instanceof Error ? error.message : 'Could not load ride activity.') }
-    finally { setHistoryBusy(false) }
+    try {
+      setHistory(await request<Ride[]>('/api/rides/history', token))
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : 'Could not load ride activity.')
+    } finally {
+      setHistoryBusy(false)
+    }
   }
 
   if (!profile) return <AuthScreen onLogin={login} />
 
   const isDriver = profile.role === 'driver'
   const displayedRide = ride ?? (activeTab === 'activity' ? history[0] : null)
+
   return (
     <main className="app-shell">
-      <header className="topbar"><a className="wordmark dark-wordmark" href="#"><Icon name="brand" size={22} /> waygo<span>.</span></a><nav className="topnav"><button className={activeTab === 'ride' ? 'nav-active' : ''} onClick={() => setActiveTab('ride')}>{isDriver ? 'Drive' : 'Ride'}</button><button className={activeTab === 'activity' ? 'nav-active' : ''} onClick={showActivity}>Activity</button></nav><div className="top-user"><span className="avatar">{profile.name.charAt(0).toUpperCase()}</span><span className="user-name">{profile.name.split(' ')[0]}</span><button className="icon-button logout-button" onClick={logout} aria-label="Sign out"><Icon name="logout" /></button></div></header>
+      <header className="topbar">
+        <a className="wordmark dark-wordmark" href="#">
+          <Icon name="brand" size={22} /> waygo<span>.</span>
+        </a>
+        <nav className="topnav">
+          <button className={activeTab === 'ride' ? 'nav-active' : ''} onClick={() => setActiveTab('ride')}>
+            {isDriver ? 'Drive' : 'Ride'}
+          </button>
+          <button className={activeTab === 'activity' ? 'nav-active' : ''} onClick={showActivity}>
+            Activity
+          </button>
+        </nav>
+        <div className="top-user">
+          <span className="avatar">{profile.name.charAt(0).toUpperCase()}</span>
+          <span className="user-name">{profile.name.split(' ')[0]}</span>
+          <button className="icon-button logout-button" onClick={logout} aria-label="Sign out">
+            <Icon name="logout" />
+          </button>
+        </div>
+      </header>
+
       <div className="dashboard">
-        {activeTab === 'ride' ? <section className="booking-panel" id="ride">
-          <span className="eyebrow muted">{isDriver ? 'DRIVER SPACE' : 'THE CITY IS YOURS'}</span>
-          <h1>{isDriver ? <>Your next ride<br /><em>starts here.</em></> : <>Where to,<br /><em>{profile.name.split(' ')[0]}?</em></>}</h1>
-          <p className="section-subtitle">{isDriver ? 'Good things happen when you get moving.' : 'The best routes start with you.'}</p>
-          {isDriver ? <DriverPanel rides={openRides} busy={busy} onToggle={async () => { try { const updated = await request<Profile>('/api/drivers/availability', token, { method: 'PATCH', body: JSON.stringify({ available: !profile.available }) }); setProfile(updated); setNotice(updated.available ? 'You’re online and ready for trips.' : 'You’re now offline.') } catch (error) { setNotice(error instanceof Error ? error.message : 'Could not update availability.')           } }} onAccept={id => driverAction(`/api/rides/${id}/accept`, 'POST')} onStatus={(id, status) => driverAction(`/api/rides/${id}/status`, 'PATCH', { status })} available={profile.available ?? false} /> : <RiderPanel pickup={pickup} dropoff={dropoff} estimate={estimate} ride={ride} suggestions={suggestions} paymentUrl={paymentUrl} checkoutRetryAvailable={checkoutFailedRideId === ride?.id} onRetryCheckout={retryCheckout} busy={busy} onInput={searchPlaces} onChoose={choosePlace} onSwap={() => { setPickup(dropoff); setDropoff(pickup); setPlaces({ pickup: places.dropoff, dropoff: places.pickup }); setEstimate(null) }} onEstimate={getEstimate} onBook={bookRide} onCancel={cancelRide} onReset={() => { rideRefreshVersion.current++; setRide(null); setPaymentUrl(''); setEstimate(null); setCheckoutFailedRideId('') }} /> }          <div className="trust-row"><span><Icon name="check" size={15} /> Upfront pricing</span><span><Icon name="check" size={15} /> Safe by design</span></div>
-        </section> : <ActivityPanel rides={history} loading={historyBusy} />}
-        <section className="map-panel"><MapArt route={Boolean(estimate || displayedRide)} places={displayedRide ? { pickup: displayedRide.pickup, dropoff: displayedRide.dropoff } : places} />{estimate && !displayedRide && <div className="estimate-float"><span><Icon name="clock" size={16} /> {estimate.duration_min} min</span><span>{estimate.distance_km} km</span></div>}{displayedRide && <div className="ride-float"><span className="live-dot" /> TRIP {displayedRide.status.replace('_', ' ').toUpperCase()}<strong>{displayedRide.driver_name ?? 'Finding a driver'}</strong>{displayedRide.payment_status && <small>Payment · {displayedRide.payment_status}</small>}</div>}<div className="map-controls"><button className="map-control" onClick={() => { rideRefreshVersion.current++; setPlaces({}); setPickup(''); setDropoff(''); setEstimate(null); setRide(null); setPaymentUrl('') }} aria-label="Reset map"><Icon name="search" /></button><button className="map-control" onClick={locatePickup} aria-label="Use my current location"><Icon name="pin" /></button></div></section>
+        {activeTab === 'ride' ? (
+          <section className="booking-panel" id="ride">
+            <span className="eyebrow muted">{isDriver ? 'DRIVER SPACE' : 'THE CITY IS YOURS'}</span>
+            <h1>
+              {isDriver ? (
+                <>Your next ride<br /><em>starts here.</em></>
+              ) : (
+                <>Where to,<br /><em>{profile.name.split(' ')[0]}?</em></>
+              )}
+            </h1>
+            <p className="section-subtitle">
+              {isDriver ? 'Good things happen when you get moving.' : 'The best routes start with you.'}
+            </p>
+
+            {isDriver ? (
+              <DriverPanel
+                profile={profile}
+                rides={openRides}
+                busy={busy}
+                showVehicleEdit={showVehicleEdit}
+                onToggleVehicleEdit={() => setShowVehicleEdit(!showVehicleEdit)}
+                onUpdateVehicle={updateVehicle}
+                onToggle={async () => {
+                  try {
+                    const updated = await request<Profile>('/api/drivers/availability', token, {
+                      method: 'PATCH',
+                      body: JSON.stringify({ available: !profile.available }),
+                    })
+                    setProfile(updated)
+                    setNotice(updated.available ? 'You’re online and ready for trips.' : 'You’re now offline.')
+                  } catch (error) {
+                    setNotice(error instanceof Error ? error.message : 'Could not update availability.')
+                  }
+                }}
+                onAccept={id => driverAction(`/api/rides/${id}/accept`, 'POST')}
+                onDecline={declineRide}
+                onStatus={(id, status) => driverAction(`/api/rides/${id}/status`, 'PATCH', { status })}
+                available={profile.available ?? false}
+              />
+            ) : (
+              <RiderPanel
+                pickup={pickup}
+                dropoff={dropoff}
+                estimate={estimate}
+                selectedTier={selectedTier}
+                onSelectTier={setSelectedTier}
+                ride={ride}
+                suggestions={suggestions}
+                paymentUrl={paymentUrl}
+                checkoutRetryAvailable={checkoutFailedRideId === ride?.id}
+                onRetryCheckout={retryCheckout}
+                busy={busy}
+                onInput={searchPlaces}
+                onChoose={choosePlace}
+                onSwap={() => {
+                  setPickup(dropoff)
+                  setDropoff(pickup)
+                  setPlaces({ pickup: places.dropoff, dropoff: places.pickup })
+                  setEstimate(null)
+                }}
+                onEstimate={getEstimate}
+                onBook={bookRide}
+                onCancel={cancelRide}
+                onRate={submitRating}
+                onReset={() => {
+                  rideRefreshVersion.current++
+                  setRide(null)
+                  setPaymentUrl('')
+                  setEstimate(null)
+                  setCheckoutFailedRideId('')
+                }}
+              />
+            )}
+            <div className="trust-row">
+              <span><Icon name="check" size={15} /> Upfront pricing</span>
+              <span><Icon name="check" size={15} /> Safe by design</span>
+            </div>
+          </section>
+        ) : (
+          <ActivityPanel
+            rides={history}
+            loading={historyBusy}
+            onSelectRide={setSelectedReceiptRide}
+          />
+        )}
+
+        <section className="map-panel">
+          <MapArt
+            route={Boolean(estimate || displayedRide)}
+            places={displayedRide ? { pickup: displayedRide.pickup, dropoff: displayedRide.dropoff } : places}
+          />
+          {estimate && !displayedRide && (
+            <div className="estimate-float">
+              <span><Icon name="clock" size={16} /> {estimate.duration_min} min</span>
+              <span>{estimate.distance_km} km</span>
+            </div>
+          )}
+          {displayedRide && (
+            <div className="ride-float">
+              <span className="live-dot" /> TRIP {displayedRide.status.replace('_', ' ').toUpperCase()}
+              <strong>{displayedRide.driver_name ?? 'Finding a driver'}</strong>
+              {displayedRide.payment_status && <small>Payment · {displayedRide.payment_status}</small>}
+            </div>
+          )}
+          <div className="map-controls">
+            <button
+              className="map-control"
+              onClick={() => {
+                rideRefreshVersion.current++
+                setPlaces({})
+                setPickup('')
+                setDropoff('')
+                setEstimate(null)
+                setRide(null)
+                setPaymentUrl('')
+              }}
+              aria-label="Reset map"
+            >
+              <Icon name="search" />
+            </button>
+            <button className="map-control" onClick={locatePickup} aria-label="Use my current location">
+              <Icon name="pin" />
+            </button>
+          </div>
+        </section>
       </div>
-      <footer className="app-footer"><span>Move freely. <span className="footer-accent">Go further.</span></span><span>© 2026 waygo. &nbsp;·&nbsp; Built for the way you move.</span></footer>
-      {notice && <div className="toast" role="status">{notice}<button onClick={() => setNotice('')} aria-label="Dismiss">×</button></div>}
+
+      <footer className="app-footer">
+        <span>Move freely. <span className="footer-accent">Go further.</span></span>
+        <span>© 2026 waygo. &nbsp;·&nbsp; Built for the way you move.</span>
+      </footer>
+
+      {selectedReceiptRide && (
+        <ReceiptModal
+          ride={selectedReceiptRide}
+          onClose={() => setSelectedReceiptRide(null)}
+        />
+      )}
+
+      {notice && (
+        <div className="toast" role="status">
+          {notice}
+          <button onClick={() => setNotice('')} aria-label="Dismiss">×</button>
+        </div>
+      )}
     </main>
   )
 }
 
-function ActivityPanel({ rides, loading }: { rides: Ride[]; loading: boolean }) {
-  return <section className="booking-panel activity-panel" id="activity">
-    <span className="eyebrow muted">YOUR JOURNEY</span>
-    <h1>Your ride<br /><em>history.</em></h1>
-    <p className="section-subtitle">Every trip, all in one place.</p>
-    <div className="activity-list">{loading ? <p className="activity-empty">Loading your trips…</p> : rides.length ? rides.map(item => <article className="activity-item" key={item.id}><div className="activity-route"><span className={`activity-status status-${item.status}`}><Icon name={item.status === 'completed' ? 'check' : 'car'} size={15} /></span><span><strong>{item.pickup.name}</strong><small>{item.dropoff.name}</small></span><b>£{item.fare.toFixed(2)}</b></div><div className="activity-meta"><span>{item.status.replace('_', ' ')}</span><span>{item.created_at ? new Date(item.created_at).toLocaleDateString() : 'Recent trip'}</span></div></article>) : <div className="activity-empty"><span><Icon name="clock" size={21} /></span><strong>No trips yet</strong><p>Your ride history will show up here.</p></div>}</div>
-  </section>
+function ActivityPanel({
+  rides,
+  loading,
+  onSelectRide,
+}: {
+  rides: Ride[]
+  loading: boolean
+  onSelectRide: (ride: Ride) => void
+}) {
+  return (
+    <section className="booking-panel activity-panel" id="activity">
+      <span className="eyebrow muted">YOUR JOURNEY</span>
+      <h1>Your ride<br /><em>history.</em></h1>
+      <p className="section-subtitle">Every trip, all in one place. Click any trip to view receipt.</p>
+      <div className="activity-list">
+        {loading ? (
+          <p className="activity-empty">Loading your trips…</p>
+        ) : rides.length ? (
+          rides.map(item => (
+            <article
+              className="activity-item"
+              key={item.id}
+              onClick={() => onSelectRide(item)}
+              role="button"
+              tabIndex={0}
+              onKeyDown={e => { if (e.key === 'Enter') onSelectRide(item) }}
+            >
+              <div className="activity-route">
+                <span className={`activity-status status-${item.status}`}>
+                  <Icon name={item.status === 'completed' ? 'check' : 'car'} size={15} />
+                </span>
+                <span>
+                  <strong>{item.pickup.name}</strong>
+                  <small>{item.dropoff.name}</small>
+                </span>
+                <b>£{item.fare.toFixed(2)}</b>
+              </div>
+              <div className="activity-meta">
+                {item.tier_name && <span className="tier-tag">{item.tier_name}</span>}
+                <span>{item.status.replace('_', ' ')}</span>
+                {item.rating && (
+                  <span className="driver-rating-badge">
+                    <Icon name="star" size={11} /> {item.rating}★
+                  </span>
+                )}
+                <span>{item.created_at ? new Date(item.created_at).toLocaleDateString() : 'Recent trip'}</span>
+              </div>
+            </article>
+          ))
+        ) : (
+          <div className="activity-empty">
+            <span><Icon name="clock" size={21} /></span>
+            <strong>No trips yet</strong>
+            <p>Your ride history will show up here.</p>
+          </div>
+        )}
+      </div>
+    </section>
+  )
 }
 
-function RiderPanel({ pickup, dropoff, estimate, ride, suggestions, paymentUrl, checkoutRetryAvailable, onRetryCheckout, busy, onInput, onChoose, onSwap, onEstimate, onBook, onCancel, onReset }: {
-  pickup: string; dropoff: string; estimate: { distance_km: number; duration_min: number; fare: number } | null
-  ride: Ride | null; suggestions: { field: 'pickup' | 'dropoff'; options: Place[] } | null
-  paymentUrl: string; checkoutRetryAvailable: boolean; onRetryCheckout: (id: string) => void
-  busy: boolean; onInput: (field: 'pickup' | 'dropoff', value: string) => void
-  onChoose: (field: 'pickup' | 'dropoff', place: Place) => void; onSwap: () => void
-  onEstimate: () => void; onBook: () => void; onCancel: (id: string) => void; onReset: () => void
+function RiderPanel({
+  pickup,
+  dropoff,
+  estimate,
+  selectedTier,
+  onSelectTier,
+  ride,
+  suggestions,
+  paymentUrl,
+  checkoutRetryAvailable,
+  onRetryCheckout,
+  busy,
+  onInput,
+  onChoose,
+  onSwap,
+  onEstimate,
+  onBook,
+  onCancel,
+  onRate,
+  onReset,
+}: {
+  pickup: string
+  dropoff: string
+  estimate: {
+    distance_km: number
+    duration_min: number
+    fare: number
+    tiers?: Record<TierKey, TierEstimate>
+  } | null
+  selectedTier: TierKey
+  onSelectTier: (tier: TierKey) => void
+  ride: Ride | null
+  suggestions: { field: 'pickup' | 'dropoff'; options: Place[] } | null
+  paymentUrl: string
+  checkoutRetryAvailable: boolean
+  onRetryCheckout: (id: string) => void
+  busy: boolean
+  onInput: (field: 'pickup' | 'dropoff', value: string) => void
+  onChoose: (field: 'pickup' | 'dropoff', place: Place) => void
+  onSwap: () => void
+  onEstimate: () => void
+  onBook: () => void
+  onCancel: (id: string) => void
+  onRate: (rideId: string, rating: number, feedback?: string) => void
+  onReset: () => void
 }) {
-  if (ride) return <div className="trip-card"><div className="trip-heading"><span className="live-dot" /><span>YOUR RIDE</span><b>{ride.status.replace('_', ' ')}</b></div><div className="trip-route"><div className="route-dots"><i /><span /><i /></div><div><strong>{ride.pickup.name}</strong><strong>{ride.dropoff.name}</strong></div></div><div className="trip-driver"><span className="driver-avatar"><Icon name="user" /></span><div><b>{ride.driver_name ?? 'Finding a driver'}</b><span>{ride.payment_status === 'paid' ? 'Payment complete' : ride.driver_name ? 'Your driver is on the way' : 'We’re matching you with a nearby driver'}</span></div><strong>£{ride.fare.toFixed(2)}</strong></div>{paymentUrl && ride.payment_status !== 'paid' && <a className="button button-primary checkout-button" href={paymentUrl}>Continue to secure payment <Icon name="arrow" /></a>}{checkoutRetryAvailable && ride.payment_status !== 'paid' && <button className="button button-primary checkout-button" onClick={() => onRetryCheckout(ride.id)}>Retry secure payment <Icon name="arrow" /></button>}{ride.status === 'requested' ? <button className="text-button trip-done" disabled={busy} onClick={() => onCancel(ride.id)}>Cancel ride request</button> : ride.status === 'completed' && ride.payment_status === 'paid' ? <button className="text-button trip-done" onClick={onReset}>Request another ride</button> : <p className="trip-waiting">{ride.status === 'completed' ? 'Complete your payment to finish this trip.' : 'You can request another ride after this trip is complete.'}</p>}</div>
-  return <div className="ride-form">
-    <div className="location-inputs"><div className="input-icons"><span className="origin-dot" /><span className="connector" /><span className="destination-pin"><Icon name="pin" size={17} /></span></div><div className="place-fields"><div className="place-wrap"><input aria-label="Pickup location" placeholder="Pickup location" value={pickup} onChange={event => onInput('pickup', event.target.value)} autoComplete="off" />{suggestions?.field === 'pickup' && <PlaceSuggestions options={suggestions.options} onChoose={place => onChoose('pickup', place)} />}</div><div className="input-divider" /><div className="place-wrap"><input aria-label="Where to" placeholder="Where to?" value={dropoff} onChange={event => onInput('dropoff', event.target.value)} autoComplete="off" />{suggestions?.field === 'dropoff' && <PlaceSuggestions options={suggestions.options} onChoose={place => onChoose('dropoff', place)} />}</div></div><button className="swap-button" onClick={onSwap} aria-label="Swap locations"><Icon name="swap" /></button></div>
-    {!MAPBOX_TOKEN && <div className="provider-note"><span>i</span><span>Configure <code>VITE_MAPBOX_TOKEN</code> and backend <code>MAPBOX_ACCESS_TOKEN</code> to search and map places.</span></div>}
-    {estimate ? <div className="fare-card"><div><span>ESTIMATED FARE</span><strong>£{estimate.fare.toFixed(2)}</strong></div><div className="fare-meta"><span><Icon name="clock" size={15} /> {estimate.duration_min} min</span><span><Icon name="car" size={16} /> {estimate.distance_km} km</span></div><button className="button button-primary" onClick={onBook} disabled={busy}>{busy ? 'Requesting…' : 'Request a ride'}<Icon name="arrow" /></button></div> : <button className="button button-primary estimate-button" onClick={onEstimate} disabled={busy}>{busy ? 'Finding a route…' : 'See ride options'}<Icon name="arrow" /></button>}
-    {!estimate && <div className="pickup-caption"><Icon name="pin" size={15} /> Add your start and destination to see ride options</div>}
-    <div className="ride-option"><div className="ride-icon"><Icon name="car" size={23} /></div><div className="ride-details"><strong>Waygo</strong><span>Everyday rides <i /> 3 min away</span></div><strong className="ride-price">{estimate ? `£${estimate.fare.toFixed(2)}` : '—'}</strong></div>
-    {paymentUrl && <a className="button button-primary checkout-button" href={paymentUrl}>Pay securely <Icon name="wallet" /></a>}
-  </div>
+  const [ratingVal, setRatingVal] = useState(5)
+  const [hoverRating, setHoverRating] = useState(0)
+  const [feedbackChip, setFeedbackChip] = useState('')
+
+  if (ride) {
+    const isCompletedAndPaid = ride.status === 'completed' && ride.payment_status === 'paid'
+
+    return (
+      <div className="trip-card">
+        <div className="trip-heading">
+          <span className="live-dot" />
+          <span>YOUR RIDE</span>
+          <b>{ride.status.replace('_', ' ')}</b>
+        </div>
+        <div className="trip-route">
+          <div className="route-dots"><i /><span /><i /></div>
+          <div>
+            <strong>{ride.pickup.name}</strong>
+            <strong>{ride.dropoff.name}</strong>
+          </div>
+        </div>
+
+        <div className="trip-driver">
+          <span className="driver-avatar"><Icon name="user" /></span>
+          <div>
+            <b>
+              {ride.driver_name ?? 'Finding a driver'}
+              {ride.driver_rating && (
+                <span className="driver-rating-badge">
+                  <Icon name="star" size={11} /> {ride.driver_rating.toFixed(1)}
+                </span>
+              )}
+            </b>
+            {ride.vehicle ? (
+              <div className="driver-vehicle-details">
+                <span>{ride.vehicle.color} {ride.vehicle.make} {ride.vehicle.model}</span>
+                <span className="plate-badge">{ride.vehicle.license_plate}</span>
+              </div>
+            ) : (
+              <span>
+                {ride.payment_status === 'paid'
+                  ? 'Payment complete'
+                  : ride.driver_name
+                  ? 'Your driver is on the way'
+                  : 'We’re matching you with a nearby driver'}
+              </span>
+            )}
+          </div>
+          <strong>£{ride.fare.toFixed(2)}</strong>
+        </div>
+
+        {paymentUrl && ride.payment_status !== 'paid' && (
+          <a className="button button-primary checkout-button" href={paymentUrl}>
+            Continue to secure payment <Icon name="arrow" />
+          </a>
+        )}
+
+        {checkoutRetryAvailable && ride.payment_status !== 'paid' && (
+          <button className="button button-primary checkout-button" onClick={() => onRetryCheckout(ride.id)}>
+            Retry secure payment <Icon name="arrow" />
+          </button>
+        )}
+
+        {isCompletedAndPaid && !ride.rating && (
+          <div className="rating-card">
+            <h3>How was your trip with {ride.driver_name ?? 'your driver'}?</h3>
+            <div className="rating-stars">
+              {[1, 2, 3, 4, 5].map(star => (
+                <button
+                  key={star}
+                  type="button"
+                  className={`star-btn${(hoverRating || ratingVal) >= star ? ' active' : ''}`}
+                  onMouseEnter={() => setHoverRating(star)}
+                  onMouseLeave={() => setHoverRating(0)}
+                  onClick={() => setRatingVal(star)}
+                  aria-label={`Rate ${star} star`}
+                >
+                  <Icon name="star" size={24} />
+                </button>
+              ))}
+            </div>
+            <div className="rating-chips">
+              {['Clean car', 'Smooth driving', 'Friendly', 'On time', 'Great route'].map(tag => (
+                <button
+                  key={tag}
+                  type="button"
+                  className={`chip-btn${feedbackChip === tag ? ' selected' : ''}`}
+                  onClick={() => setFeedbackChip(feedbackChip === tag ? '' : tag)}
+                >
+                  {tag}
+                </button>
+              ))}
+            </div>
+            <div className="rating-actions">
+              <button
+                className="button button-primary"
+                onClick={() => onRate(ride.id, ratingVal, feedbackChip || undefined)}
+                disabled={busy}
+              >
+                Submit rating
+              </button>
+              <button className="button button-secondary" onClick={onReset} disabled={busy}>
+                Skip
+              </button>
+            </div>
+          </div>
+        )}
+
+        {isCompletedAndPaid && ride.rating && (
+          <div style={{ textAlign: 'center', margin: '14px 0 6px' }}>
+            <span className="driver-rating-badge" style={{ fontSize: '12px', padding: '3px 8px' }}>
+              <Icon name="star" size={13} /> You rated this trip {ride.rating}★
+            </span>
+          </div>
+        )}
+
+        {ride.status === 'requested' ? (
+          <button className="text-button trip-done" disabled={busy} onClick={() => onCancel(ride.id)}>
+            Cancel ride request
+          </button>
+        ) : isCompletedAndPaid ? (
+          <button className="text-button trip-done" onClick={onReset}>
+            Request another ride
+          </button>
+        ) : (
+          <p className="trip-waiting">
+            {ride.status === 'completed'
+              ? 'Complete your payment to finish this trip.'
+              : 'You can request another ride after this trip is complete.'}
+          </p>
+        )}
+      </div>
+    )
+  }
+
+  const tiers: TierEstimate[] = estimate?.tiers
+    ? Object.values(estimate.tiers)
+    : [
+        {
+          tier: 'standard',
+          name: 'Waygo',
+          subtitle: 'Everyday rides',
+          seats: 4,
+          eta_min: 3,
+          fare: estimate ? estimate.fare : 0,
+          base_fare: 2.5,
+          distance_rate: 1.35,
+          time_rate: 0.18,
+        },
+      ]
+
+  const activeSelectedFare = estimate?.tiers?.[selectedTier]?.fare ?? estimate?.fare ?? 0
+
+  return (
+    <div className="ride-form">
+      <div className="location-inputs">
+        <div className="input-icons">
+          <span className="origin-dot" />
+          <span className="connector" />
+          <span className="destination-pin"><Icon name="pin" size={17} /></span>
+        </div>
+        <div className="place-fields">
+          <div className="place-wrap">
+            <input
+              aria-label="Pickup location"
+              placeholder="Pickup location"
+              value={pickup}
+              onChange={event => onInput('pickup', event.target.value)}
+              autoComplete="off"
+            />
+            {suggestions?.field === 'pickup' && (
+              <PlaceSuggestions options={suggestions.options} onChoose={place => onChoose('pickup', place)} />
+            )}
+          </div>
+          <div className="input-divider" />
+          <div className="place-wrap">
+            <input
+              aria-label="Where to"
+              placeholder="Where to?"
+              value={dropoff}
+              onChange={event => onInput('dropoff', event.target.value)}
+              autoComplete="off"
+            />
+            {suggestions?.field === 'dropoff' && (
+              <PlaceSuggestions options={suggestions.options} onChoose={place => onChoose('dropoff', place)} />
+            )}
+          </div>
+        </div>
+        <button className="swap-button" onClick={onSwap} aria-label="Swap locations">
+          <Icon name="swap" />
+        </button>
+      </div>
+
+      {!MAPBOX_TOKEN && (
+        <div className="provider-note">
+          <span>i</span>
+          <span>Configure <code>VITE_MAPBOX_TOKEN</code> and backend <code>MAPBOX_ACCESS_TOKEN</code> to search and map places.</span>
+        </div>
+      )}
+
+      {estimate ? (
+        <>
+          <div className="tier-list">
+            {tiers.map(t => {
+              const isSelected = selectedTier === t.tier
+              const iconName = t.tier === 'comfort' ? 'shield' : t.tier === 'xl' ? 'users' : t.tier === 'green' ? 'leaf' : 'car'
+              return (
+                <div
+                  key={t.tier}
+                  className={`tier-option${isSelected ? ' selected' : ''}`}
+                  onClick={() => onSelectTier(t.tier)}
+                  role="button"
+                  tabIndex={0}
+                  onKeyDown={e => { if (e.key === 'Enter') onSelectTier(t.tier) }}
+                >
+                  <div className="tier-icon"><Icon name={iconName} size={20} /></div>
+                  <div className="tier-info">
+                    <div className="tier-title-row">
+                      <strong>{t.name}</strong>
+                      <span className="tier-seats"><Icon name="user" size={12} /> {t.seats}</span>
+                    </div>
+                    <span className="tier-sub">{t.subtitle}</span>
+                  </div>
+                  <div className="tier-price-col">
+                    <span className="tier-price">£{t.fare.toFixed(2)}</span>
+                    <span className="tier-eta">{t.eta_min} min away</span>
+                  </div>
+                </div>
+              )
+            })}
+          </div>
+
+          <div className="fare-card">
+            <div>
+              <span>SELECTED FARE</span>
+              <strong>£{activeSelectedFare.toFixed(2)}</strong>
+            </div>
+            <div className="fare-meta">
+              <span><Icon name="clock" size={15} /> {estimate.duration_min} min</span>
+              <span><Icon name="car" size={16} /> {estimate.distance_km} km</span>
+            </div>
+            <button className="button button-primary" onClick={onBook} disabled={busy}>
+              {busy ? 'Requesting…' : `Request ${estimate.tiers?.[selectedTier]?.name ?? 'ride'}`}
+              <Icon name="arrow" />
+            </button>
+          </div>
+        </>
+      ) : (
+        <button className="button button-primary estimate-button" onClick={onEstimate} disabled={busy}>
+          {busy ? 'Finding a route…' : 'See ride options'}
+          <Icon name="arrow" />
+        </button>
+      )}
+
+      {!estimate && (
+        <div className="pickup-caption">
+          <Icon name="pin" size={15} /> Add your start and destination to see ride options
+        </div>
+      )}
+
+      {paymentUrl && (
+        <a className="button button-primary checkout-button" href={paymentUrl}>
+          Pay securely <Icon name="wallet" />
+        </a>
+      )}
+    </div>
+  )
 }
 
 function PlaceSuggestions({ options, onChoose }: { options: Place[]; onChoose: (place: Place) => void }) {
   if (!options.length) return <div className="suggestion-list no-matches" role="status">No matching UK locations were found.</div>
-  return <div className="suggestion-list" role="listbox">{options.map((place, index) => <button key={`${place.latitude}-${place.longitude}-${index}`} role="option" aria-selected="false" onClick={() => onChoose(place)}><Icon name="pin" size={17} /><span><b>{place.name}</b><small>{place.address}</small></span></button>)}</div>
+  return (
+    <div className="suggestion-list" role="listbox">
+      {options.map((place, index) => (
+        <button key={`${place.latitude}-${place.longitude}-${index}`} role="option" aria-selected="false" onClick={() => onChoose(place)}>
+          <Icon name="pin" size={17} />
+          <span><b>{place.name}</b><small>{place.address}</small></span>
+        </button>
+      ))}
+    </div>
+  )
 }
 
-function DriverPanel({ rides, busy, available, onToggle, onAccept, onStatus }: {
-  rides: Ride[]; busy: boolean; available: boolean; onToggle: () => void
-  onAccept: (id: string) => void; onStatus: (id: string, status: RideStatus) => void
+function DriverPanel({
+  profile,
+  rides,
+  busy,
+  available,
+  showVehicleEdit,
+  onToggleVehicleEdit,
+  onUpdateVehicle,
+  onToggle,
+  onAccept,
+  onDecline,
+  onStatus,
+}: {
+  profile: Profile
+  rides: Ride[]
+  busy: boolean
+  available: boolean
+  showVehicleEdit: boolean
+  onToggleVehicleEdit: () => void
+  onUpdateVehicle: (v: VehicleInfo) => void
+  onToggle: () => void
+  onAccept: (id: string) => void
+  onDecline: (id: string) => void
+  onStatus: (id: string, status: RideStatus) => void
 }) {
-  return <div className="driver-panel"><button className={`availability-button${available ? ' is-online' : ''}`} onClick={onToggle} disabled={busy}><span className="availability-dot" />{available ? 'You’re online' : 'Go online'}<span className="availability-switch" /></button><p className="driver-caption">{available ? 'You can receive trip requests nearby.' : 'Go online when you’re ready to drive.'}</p><div className="driver-rides-title"><span>Your trips</span><span>{rides.length} nearby</span></div>{rides.length ? <div className="driver-rides">{rides.map(item => <article className="driver-ride" key={item.id}><div className="trip-route"><div className="route-dots"><i /><span /><i /></div><div><strong>{item.pickup.name}</strong><strong>{item.dropoff.name}</strong></div></div><div className="driver-trip-meta"><span><Icon name="clock" size={14} /> {item.duration_min} min · {item.status.replace('_', ' ')}</span><b>£{item.fare.toFixed(2)}</b></div>{item.status === 'requested' ? <button className="button button-primary driver-accept" disabled={!available || busy} onClick={() => onAccept(item.id)}>Accept trip<Icon name="arrow" /></button> : item.status !== 'completed' && item.status !== 'cancelled' ? <button className="button button-primary driver-accept" disabled={busy} onClick={() => onStatus(item.id, item.status === 'accepted' ? 'arriving' : item.status === 'arriving' ? 'in_progress' : 'completed')}>{item.status === 'accepted' ? 'Heading to pickup' : item.status === 'arriving' ? 'Start the ride' : 'Complete ride'}<Icon name="arrow" /></button> : <span className="driver-caption">Trip complete</span>}</article>)}</div> : <div className="empty-rides"><span><Icon name="steering" size={21} /></span><strong>No trips just yet</strong><p>New requests will show up here while you’re online.</p></div>}</div>
+  const [make, setMake] = useState(profile.vehicle?.make ?? '')
+  const [model, setModel] = useState(profile.vehicle?.model ?? '')
+  const [color, setColor] = useState(profile.vehicle?.color ?? '')
+  const [plate, setPlate] = useState(profile.vehicle?.license_plate ?? '')
+
+  function handleSaveVehicle(e: FormEvent) {
+    e.preventDefault()
+    onUpdateVehicle({ make, model, color, license_plate: plate })
+  }
+
+  return (
+    <div className="driver-panel">
+      {showVehicleEdit ? (
+        <form className="vehicle-form-card" onSubmit={handleSaveVehicle}>
+          <h4>Driver Vehicle Profile</h4>
+          <div className="vehicle-form-grid">
+            <label>Make<input placeholder="Toyota" value={make} onChange={e => setMake(e.target.value)} required /></label>
+            <label>Model<input placeholder="Prius" value={model} onChange={e => setModel(e.target.value)} required /></label>
+            <label>Color<input placeholder="Silver" value={color} onChange={e => setColor(e.target.value)} required /></label>
+            <label>License Plate<input placeholder="AB21 XYZ" value={plate} onChange={e => setPlate(e.target.value)} required /></label>
+          </div>
+          <div className="vehicle-form-actions">
+            <button className="button button-primary" type="submit" disabled={busy}>Save vehicle</button>
+            <button className="button button-secondary" type="button" onClick={onToggleVehicleEdit}>Cancel</button>
+          </div>
+        </form>
+      ) : (
+        <div className="driver-vehicle-box">
+          <div className="driver-vehicle-info">
+            <strong>
+              {profile.vehicle ? `${profile.vehicle.color} ${profile.vehicle.make} ${profile.vehicle.model}` : 'No vehicle configured'}
+              {profile.rating_avg && (
+                <span className="driver-rating-badge">
+                  <Icon name="star" size={11} /> {profile.rating_avg.toFixed(1)} ({profile.rating_count ?? 0} trips)
+                </span>
+              )}
+            </strong>
+            <span>{profile.vehicle ? `Plate: ${profile.vehicle.license_plate}` : 'Add your car details for riders to see.'}</span>
+          </div>
+          <button className="vehicle-edit-btn" onClick={onToggleVehicleEdit}>
+            {profile.vehicle ? 'Edit vehicle' : 'Add vehicle'}
+          </button>
+        </div>
+      )}
+
+      <button className={`availability-button${available ? ' is-online' : ''}`} onClick={onToggle} disabled={busy}>
+        <span className="availability-dot" />
+        {available ? 'You’re online' : 'Go online'}
+        <span className="availability-switch" />
+      </button>
+      <p className="driver-caption">
+        {available ? 'You can receive trip requests nearby.' : 'Go online when you’re ready to drive.'}
+      </p>
+
+      <div className="driver-rides-title">
+        <span>Your trips</span>
+        <span>{rides.length} nearby</span>
+      </div>
+
+      {rides.length ? (
+        <div className="driver-rides">
+          {rides.map(item => (
+            <article className="driver-ride" key={item.id}>
+              <div className="trip-route">
+                <div className="route-dots"><i /><span /><i /></div>
+                <div>
+                  <strong>{item.pickup.name}</strong>
+                  <strong>{item.dropoff.name}</strong>
+                </div>
+              </div>
+              <div className="driver-trip-meta">
+                <span>
+                  {item.tier_name && <span className="tier-tag">{item.tier_name}</span>}
+                  <Icon name="clock" size={14} /> {item.duration_min} min · {item.status.replace('_', ' ')}
+                </span>
+                <b>£{item.fare.toFixed(2)}</b>
+              </div>
+
+              {item.status === 'requested' ? (
+                <button
+                  className="button button-primary driver-accept"
+                  disabled={!available || busy}
+                  onClick={() => onAccept(item.id)}
+                >
+                  Accept trip<Icon name="arrow" />
+                </button>
+              ) : item.status !== 'completed' && item.status !== 'cancelled' ? (
+                <>
+                  <button
+                    className="button button-primary driver-accept"
+                    disabled={busy}
+                    onClick={() =>
+                      onStatus(
+                        item.id,
+                        item.status === 'accepted' ? 'arriving' : item.status === 'arriving' ? 'in_progress' : 'completed'
+                      )
+                    }
+                  >
+                    {item.status === 'accepted' ? 'Heading to pickup' : item.status === 'arriving' ? 'Start the ride' : 'Complete ride'}
+                    <Icon name="arrow" />
+                  </button>
+                  {item.status === 'accepted' && (
+                    <button
+                      className="driver-decline-btn"
+                      disabled={busy}
+                      onClick={() => onDecline(item.id)}
+                    >
+                      Decline trip
+                    </button>
+                  )}
+                </>
+              ) : (
+                <span className="driver-caption">Trip complete</span>
+              )}
+            </article>
+          ))}
+        </div>
+      ) : (
+        <div className="empty-rides">
+          <span><Icon name="steering" size={21} /></span>
+          <strong>No trips just yet</strong>
+          <p>New requests will show up here while you’re online.</p>
+        </div>
+      )}
+    </div>
+  )
+}
+
+function ReceiptModal({ ride, onClose }: { ride: Ride; onClose: () => void }) {
+  const itemized = ride.itemized_fare ?? {
+    base_fare: 2.50,
+    distance_km: ride.distance_km,
+    distance_rate: 1.35,
+    duration_min: ride.duration_min,
+    time_rate: 0.18,
+    total: ride.fare,
+  }
+
+  return (
+    <div className="receipt-modal-backdrop" onClick={onClose} role="presentation">
+      <div className="receipt-modal" onClick={e => e.stopPropagation()} role="dialog" aria-modal="true">
+        <div className="receipt-header">
+          <h3><Icon name="receipt" size={18} /> Trip Receipt</h3>
+          <button className="receipt-close" onClick={onClose} aria-label="Close receipt">
+            <Icon name="close" size={16} />
+          </button>
+        </div>
+        <div className="receipt-body">
+          <div className="trip-route" style={{ margin: 0 }}>
+            <div className="route-dots"><i /><span /><i /></div>
+            <div>
+              <strong>{ride.pickup.name}</strong>
+              <strong>{ride.dropoff.name}</strong>
+            </div>
+          </div>
+
+          <div className="receipt-meta-box">
+            <div>
+              <span className="tier-tag">{ride.tier_name ?? 'Waygo Standard'}</span>
+              <p style={{ margin: '4px 0 0', fontSize: '11px', color: '#686e61' }}>
+                {ride.created_at ? new Date(ride.created_at).toLocaleString() : 'Recent'}
+              </p>
+            </div>
+            {ride.rating && (
+              <span className="driver-rating-badge">
+                <Icon name="star" size={12} /> {ride.rating}★ Rated
+              </span>
+            )}
+          </div>
+
+          {ride.driver_name && (
+            <div className="trip-driver" style={{ marginTop: 0 }}>
+              <span className="driver-avatar"><Icon name="user" /></span>
+              <div>
+                <b>{ride.driver_name}</b>
+                {ride.vehicle && (
+                  <div className="driver-vehicle-details">
+                    <span>{ride.vehicle.color} {ride.vehicle.make} {ride.vehicle.model}</span>
+                    <span className="plate-badge">{ride.vehicle.license_plate}</span>
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
+
+          <div className="receipt-breakdown">
+            <div className="receipt-row">
+              <span>Base fare</span>
+              <span>£{itemized.base_fare.toFixed(2)}</span>
+            </div>
+            <div className="receipt-row">
+              <span>Distance ({itemized.distance_km} km @ £{itemized.distance_rate.toFixed(2)}/km)</span>
+              <span>£{(itemized.distance_km * itemized.distance_rate).toFixed(2)}</span>
+            </div>
+            <div className="receipt-row">
+              <span>Time ({itemized.duration_min} min @ £{itemized.time_rate.toFixed(2)}/min)</span>
+              <span>£{(itemized.duration_min * itemized.time_rate).toFixed(2)}</span>
+            </div>
+            <div className="receipt-row total">
+              <span>Total charged</span>
+              <span>£{itemized.total.toFixed(2)}</span>
+            </div>
+            <div className="receipt-row" style={{ fontSize: '10px', color: '#888d81', marginTop: '4px' }}>
+              <span>Payment status</span>
+              <span style={{ textTransform: 'capitalize', fontWeight: 600 }}>{ride.payment_status}</span>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  )
 }
 
 export default App
