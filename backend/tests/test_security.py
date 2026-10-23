@@ -1,8 +1,16 @@
-import jwt
+﻿import jwt
 import pytest
 from pydantic import ValidationError
 
-from app.main import Place, issue_token, password_hash, password_matches, settings
+from app.main import (
+    Place,
+    checkout_payment_matches_ride,
+    issue_token,
+    parse_bearer_token,
+    password_hash,
+    password_matches,
+    settings,
+)
 
 
 def test_password_hash_verifies_without_storing_plaintext():
@@ -30,3 +38,23 @@ def test_access_token_contains_user_identity_and_expiry(monkeypatch):
 def test_places_reject_out_of_range_coordinates():
     with pytest.raises(ValidationError):
         Place(name="London", address="London, UK", latitude=93, longitude=0)
+
+
+def test_bearer_tokens_are_parsed_case_insensitively_and_trimmed():
+    assert parse_bearer_token("Bearer token-123") == "token-123"
+    assert parse_bearer_token("bearer   token-456") == "token-456"
+    assert parse_bearer_token("Token token-789") is None
+    assert parse_bearer_token("Bearer   ") is None
+
+
+def test_checkout_payment_matches_precision_and_rounding():
+    ride = {"id": "ride-456", "fare": 12.345}
+    session = {
+        "mode": "payment",
+        "payment_status": "paid",
+        "metadata": {"ride_id": "ride-456"},
+        "currency": "gbp",
+        "amount_total": 1235,
+    }
+
+    assert checkout_payment_matches_ride(session, ride)

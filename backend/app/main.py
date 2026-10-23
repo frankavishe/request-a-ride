@@ -7,6 +7,7 @@ import secrets
 import time
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
+from decimal import Decimal, ROUND_HALF_UP
 from typing import Literal
 from urllib.parse import quote
 from uuid import uuid4
@@ -70,6 +71,16 @@ def issue_token(user: dict) -> str:
         settings.jwt_secret,
         algorithm="HS256",
     )
+
+
+def parse_bearer_token(auth_header: str | None) -> str | None:
+    if not auth_header:
+        return None
+    parts = auth_header.split()
+    if len(parts) != 2 or parts[0].lower() != "bearer":
+        return None
+    token = parts[1].strip()
+    return token or None
 
 
 @asynccontextmanager
@@ -138,9 +149,9 @@ class RouteEstimate(BaseModel):
 async def current_user(
     request: Request, authorization: str | None = Header(default=None)
 ) -> dict:
-    if not authorization or not authorization.startswith("Bearer "):
+    token = parse_bearer_token(authorization)
+    if not token:
         raise HTTPException(status_code=401, detail="Sign in to continue.")
-    token = authorization[7:]
     try:
         payload = jwt.decode(token, settings.jwt_secret, algorithms=["HS256"])
     except jwt.InvalidTokenError as exc:
@@ -207,9 +218,31 @@ def ride_response(ride: dict, driver: dict | None = None) -> dict:
     return result
 
 
+def checkout_payment_matches_ride(session: dict, ride: dict) -> bool:
+    metadata = session.get("metadata")
+    if not isinstance(metadata, dict):
+        return False
+    try:
+        expected_amount = int(
+            (Decimal(str(ride.get("fare", 0))) * Decimal("100")).quantize(Decimal("1"), rounding=ROUND_HALF_UP)
+        )
+    except (ArithmeticError, ValueError, TypeError):
+        return False
+    return (
+        session.get("mode") == "payment"
+        and session.get("payment_status") == "paid"
+        and metadata.get("ride_id") == ride["id"]
+        and session.get("currency") == "gbp"
+        and session.get("amount_total") == expected_amount
+    )
+
+
 async def create_checkout(ride: dict, email: str) -> str:
     if not settings.stripe_secret_key:
         raise HTTPException(status_code=503, detail="Payments are unavailable. Configure STRIPE_SECRET_KEY.")
+    amount_cents = int(
+        (Decimal(str(ride.get("fare", 0))) * Decimal("100")).quantize(Decimal("1"), rounding=ROUND_HALF_UP)
+    )
     try:
         async with httpx.AsyncClient(timeout=15) as client:
             response = await client.post(
@@ -222,7 +255,7 @@ async def create_checkout(ride: dict, email: str) -> str:
                     "success_url": f"{settings.app_url}/?payment=success&ride_id={ride['id']}",
                     "cancel_url": f"{settings.app_url}/?payment=cancelled&ride_id={ride['id']}",
                     "line_items[0][price_data][currency]": "gbp",
-                    "line_items[0][price_data][unit_amount]": str(round(ride["fare"] * 100)),
+                    "line_items[0][price_data][unit_amount]": str(amount_cents),
                     "line_items[0][price_data][product_data][name]": "Waygo ride",
                     "line_items[0][quantity]": "1",
                     "metadata[ride_id]": ride["id"],
@@ -541,10 +574,16 @@ async def stripe_webhook(request: Request, stripe_signature: str | None = Header
         raise HTTPException(status_code=400, detail="Payment webhook payload is invalid.") from exc
     if event.get("type") in {"checkout.session.completed", "checkout.session.async_payment_succeeded"}:
         session = event.get("data", {}).get("object", {})
-        ride_id = session.get("metadata", {}).get("ride_id")
-        if ride_id and session.get("payment_status") == "paid":
+        if session.get("payment_status") == "paid":
+            metadata = session.get("metadata")
+            ride_id = metadata.get("ride_id") if isinstance(metadata, dict) else None
+            if not ride_id:
+                raise HTTPException(status_code=400, detail="Payment session is missing its ride reference.")
+            ride = await request.app.state.db.rides.find_one({"id": ride_id})
+            if not ride or not checkout_payment_matches_ride(session, ride):
+                raise HTTPException(status_code=400, detail="Payment session does not match a ride.")
             await request.app.state.db.rides.update_one(
-                {"id": ride_id},
+                {"id": ride_id, "payment_status": {"$ne": "paid"}},
                 {"$set": {"payment_status": "paid", "updated_at": utc_now()}},
             )
     return {"received": True}

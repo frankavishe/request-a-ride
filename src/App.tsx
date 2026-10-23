@@ -139,27 +139,49 @@ function App() {
   }
 
   useEffect(() => {
-    if (!token) { setProfile(null); return }
-    request<Profile>('/api/auth/me', token).then(setProfile).catch(logout)
+    if (!token) return
+    let active = true
+    request<Profile>('/api/auth/me', token)
+      .then(user => { if (active) setProfile(user) })
+      .catch(() => { if (active) logout() })
+    return () => { active = false }
   }, [token])
 
   useEffect(() => {
     if (!profile || profile.role !== 'driver') return
-    const load = () => request<Ride[]>('/api/rides/open', token).then(setOpenRides).catch(error => setNotice(error.message))
+    let active = true
+    let loading = false
+    const load = async () => {
+      if (loading) return
+      loading = true
+      try {
+        const rides = await request<Ride[]>('/api/rides/open', token)
+        if (active) setOpenRides(rides)
+      } catch (error) {
+        if (active) setNotice(error instanceof Error ? error.message : 'Could not refresh available trips.')
+      } finally {
+        loading = false
+      }
+    }
     load()
     const interval = window.setInterval(load, 15000)
-    return () => window.clearInterval(interval)
+    return () => { active = false; window.clearInterval(interval) }
   }, [profile, token])
 
   useEffect(() => {
     if (!profile || profile.role !== 'rider') return
     let active = true
+    let loading = false
     const syncRide = async () => {
+      if (loading) return
+      loading = true
       try {
         const activeRide = await request<Ride | null>('/api/rides/active', token)
         if (active) setRide(activeRide)
       } catch (error) {
         if (active) setNotice(error instanceof Error ? error.message : 'Could not refresh your ride.')
+      } finally {
+        loading = false
       }
     }
     syncRide()
@@ -287,8 +309,7 @@ function App() {
           <span className="eyebrow muted">{isDriver ? 'DRIVER SPACE' : 'THE CITY IS YOURS'}</span>
           <h1>{isDriver ? <>Your next ride<br /><em>starts here.</em></> : <>Where to,<br /><em>{profile.name.split(' ')[0]}?</em></>}</h1>
           <p className="section-subtitle">{isDriver ? 'Good things happen when you get moving.' : 'The best routes start with you.'}</p>
-          {isDriver ? <DriverPanel rides={openRides} busy={busy} onToggle={async () => { try { const updated = await request<Profile>('/api/drivers/availability', token, { method: 'PATCH', body: JSON.stringify({ available: !profile.available }) }); setProfile(updated); setNotice(updated.available ? 'You’re online and ready for trips.' : 'You’re now offline.') } catch (error) { setNotice(error instanceof Error ? error.message : 'Could not update availability.') } }} onAccept={id => driverAction(`/api/rides/${id}/accept`, 'POST')} onStatus={(id, status) => driverAction(`/api/rides/${id}/status`, 'PATCH', { status })} available={profile.available ?? false} /> : <RiderPanel pickup={pickup} dropoff={dropoff} estimate={estimate} ride={ride} places={places} suggestions={suggestions} paymentUrl={paymentUrl} busy={busy} onInput={searchPlaces} onChoose={choosePlace} onSwap={() => { setPickup(dropoff); setDropoff(pickup); setPlaces({ pickup: places.dropoff, dropoff: places.pickup }); setEstimate(null) }} onEstimate={getEstimate} onBook={bookRide} onCancel={cancelRide} onReset={() => { setRide(null); setPaymentUrl(''); setEstimate(null) }} /> }
-          <div className="trust-row"><span><Icon name="check" size={15} /> Upfront pricing</span><span><Icon name="check" size={15} /> Safe by design</span></div>
+          {isDriver ? <DriverPanel rides={openRides} busy={busy} onToggle={async () => { try { const updated = await request<Profile>('/api/drivers/availability', token, { method: 'PATCH', body: JSON.stringify({ available: !profile.available }) }); setProfile(updated); setNotice(updated.available ? 'You’re online and ready for trips.' : 'You’re now offline.') } catch (error) { setNotice(error instanceof Error ? error.message : 'Could not update availability.')           } }} onAccept={id => driverAction(`/api/rides/${id}/accept`, 'POST')} onStatus={(id, status) => driverAction(`/api/rides/${id}/status`, 'PATCH', { status })} available={profile.available ?? false} /> : <RiderPanel pickup={pickup} dropoff={dropoff} estimate={estimate} ride={ride} suggestions={suggestions} paymentUrl={paymentUrl} busy={busy} onInput={searchPlaces} onChoose={choosePlace} onSwap={() => { setPickup(dropoff); setDropoff(pickup); setPlaces({ pickup: places.dropoff, dropoff: places.pickup }); setEstimate(null) }} onEstimate={getEstimate} onBook={bookRide} onCancel={cancelRide} onReset={() => { setRide(null); setPaymentUrl(''); setEstimate(null) }} /> }          <div className="trust-row"><span><Icon name="check" size={15} /> Upfront pricing</span><span><Icon name="check" size={15} /> Safe by design</span></div>
         </section> : <ActivityPanel rides={history} loading={historyBusy} />}
         <section className="map-panel"><MapArt route={Boolean(estimate || displayedRide)} places={displayedRide ? { pickup: displayedRide.pickup, dropoff: displayedRide.dropoff } : places} />{estimate && !displayedRide && <div className="estimate-float"><span><Icon name="clock" size={16} /> {estimate.duration_min} min</span><span>{estimate.distance_km} km</span></div>}{displayedRide && <div className="ride-float"><span className="live-dot" /> TRIP {displayedRide.status.replace('_', ' ').toUpperCase()}<strong>{displayedRide.driver_name ?? 'Finding a driver'}</strong>{displayedRide.payment_status && <small>Payment · {displayedRide.payment_status}</small>}</div>}<div className="map-controls"><button className="map-control" onClick={() => { setPlaces({}); setPickup(''); setDropoff(''); setEstimate(null); setRide(null); setPaymentUrl('') }} aria-label="Reset map"><Icon name="search" /></button><button className="map-control" onClick={locatePickup} aria-label="Use my current location"><Icon name="pin" /></button></div></section>
       </div>
@@ -307,9 +328,9 @@ function ActivityPanel({ rides, loading }: { rides: Ride[]; loading: boolean }) 
   </section>
 }
 
-function RiderPanel({ pickup, dropoff, estimate, ride, places, suggestions, paymentUrl, busy, onInput, onChoose, onSwap, onEstimate, onBook, onCancel, onReset }: {
+function RiderPanel({ pickup, dropoff, estimate, ride, suggestions, paymentUrl, busy, onInput, onChoose, onSwap, onEstimate, onBook, onCancel, onReset }: {
   pickup: string; dropoff: string; estimate: { distance_km: number; duration_min: number; fare: number } | null
-  ride: Ride | null; places: { pickup?: Place; dropoff?: Place }; suggestions: { field: 'pickup' | 'dropoff'; options: Place[] } | null
+  ride: Ride | null; suggestions: { field: 'pickup' | 'dropoff'; options: Place[] } | null
   paymentUrl: string; busy: boolean; onInput: (field: 'pickup' | 'dropoff', value: string) => void
   onChoose: (field: 'pickup' | 'dropoff', place: Place) => void; onSwap: () => void
   onEstimate: () => void; onBook: () => void; onCancel: (id: string) => void; onReset: () => void
