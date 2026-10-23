@@ -57,6 +57,10 @@
 .top-user { margin-left: auto; display: flex; align-items: center; gap: 10px; }
 .avatar,.driver-avatar { width: 32px; height: 32px; display: grid; place-items: center; border-radius: 50%; color: #46642c; background: #edf3df; font-size: 12px; font-weight: 700; }
 .user-name { color: #4a4d44; font-size: 12px; }
+.live-status { display: inline-flex; align-items: center; gap: 6px; padding: 4px 9px; border-radius: 999px; color: #8a6d3b; background: #f7efe0; font-size: 11px; font-weight: 600; }
+.live-status-dot { width: 6px; height: 6px; border-radius: 50%; background: #d9a24a; }
+.live-status.is-live { color: #46642c; background: #edf3df; }
+.live-status.is-live .live-status-dot { background: #83af49; box-shadow: 0 0 0 3px #83af4921; }
 .icon-button,.map-control { display: grid; place-items: center; padding: 0; border: 0; background: transparent; color: #80847a; cursor: pointer; }
 .logout-button { width: 32px; height: 32px; margin-left: 8px; }
 .dashboard { display: grid; grid-template-columns: minmax(350px, 405px) minmax(0, 1fr); align-items: stretch; gap: clamp(36px, 7.7vw, 122px); padding: clamp(40px, 6.1vw, 88px) clamp(24px, 6.5vw, 100px) 56px; flex: 1; }

@@ -8,6 +8,8 @@ A Bolt-inspired ride-hailing MVP with original Waygo branding, rider and driver 
 - Search for UK pickup/drop-off locations, view Mapbox driving estimates, and create a persisted ride request.
 - Drivers can go online, accept requests, and advance trips from accepted to arriving, in progress, and completed.
 - Riders see trip status updates and can pay via hosted Stripe Checkout once a driver accepts.
+- Ride requests, acceptance, trip status and payment changes are pushed live over a WebSocket (`/api/ws`); polling remains as a slower fallback.
+- While a trip is active, the driver's browser shares GPS position and the rider sees the driver on the map.
 - Passwords are stored as salted scrypt hashes; API sessions use expiring signed JWTs. Payment keys stay on the API server.
 
 ## Requirements
@@ -99,4 +101,4 @@ python -m pytest
 
 ## Scope notes
 
-Map search is restricted to the UK for this MVP. Payments are hosted by Stripe Checkout; rider payment details never pass through this API. Dispatch is request/accept based, without continuous driver GPS tracking, push notifications, or mobile apps. Before production, add privacy retention controls, rate limiting, monitoring, payment/refund reconciliation, and deployed-domain token restrictions.
+Map search is restricted to the UK for this MVP. Payments are hosted by Stripe Checkout; rider payment details never pass through this API. Dispatch is request/accept based, without push notifications or mobile apps. Driver location is shared only while the driver's tab is open and location permission is granted. The real-time hub is in-memory, so run a single API worker; scaling to multiple workers or hosts needs a shared pub/sub (for example Redis) behind the hub, and a reverse proxy must allow WebSocket upgrades on `/api/ws`. Before production, add privacy retention controls, rate limiting, monitoring, payment/refund reconciliation, and deployed-domain token restrictions.

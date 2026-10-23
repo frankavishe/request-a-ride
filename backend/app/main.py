@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import asyncio
 import base64
 import hashlib
 import hmac
+import logging
 import secrets
 import time
 from contextlib import asynccontextmanager
@@ -14,7 +16,7 @@ from uuid import uuid4
 
 import httpx
 import jwt
-from fastapi import Depends, FastAPI, Header, HTTPException, Request
+from fastapi import Depends, FastAPI, Header, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.concurrency import run_in_threadpool
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, EmailStr, Field
@@ -36,6 +38,10 @@ class Settings(BaseSettings):
 
 
 settings = Settings()
+logger = logging.getLogger("waygo")
+ACTIVE_TRIP_STATUSES = ["accepted", "arriving", "in_progress"]
+
+
 def utc_now() -> datetime:
     return datetime.now(timezone.utc)
 
@@ -176,6 +182,41 @@ app.add_middleware(
 )
 
 
+class ConnectionHub:
+    """Tracks open WebSockets per user for this API process."""
+
+    def __init__(self) -> None:
+        self.sockets: dict[str, set[WebSocket]] = {}
+        self.roles: dict[str, str] = {}
+
+    def connect(self, user: dict, websocket: WebSocket) -> None:
+        self.sockets.setdefault(user["id"], set()).add(websocket)
+        self.roles[user["id"]] = user["role"]
+
+    def disconnect(self, user_id: str, websocket: WebSocket) -> None:
+        sockets = self.sockets.get(user_id)
+        if not sockets:
+            return
+        sockets.discard(websocket)
+        if not sockets:
+            self.sockets.pop(user_id, None)
+            self.roles.pop(user_id, None)
+
+    def connected_driver_ids(self) -> list[str]:
+        return [user_id for user_id, role in self.roles.items() if role == "driver"]
+
+    async def send_to(self, user_ids, event: dict) -> None:
+        for user_id in {user_id for user_id in user_ids if user_id}:
+            for websocket in list(self.sockets.get(user_id, ())):
+                try:
+                    await websocket.send_json(event)
+                except Exception:
+                    self.disconnect(user_id, websocket)
+
+
+app.state.hub = ConnectionHub()
+
+
 class Credentials(BaseModel):
     email: EmailStr
     password: str = Field(min_length=8, max_length=128)
@@ -233,20 +274,23 @@ class RouteEstimate(BaseModel):
     dropoff: Place
 
 
-async def current_user(
-    request: Request, authorization: str | None = Header(default=None)
-) -> dict:
-    token = parse_bearer_token(authorization)
+async def user_from_token(db, token: str | None) -> dict:
     if not token:
         raise HTTPException(status_code=401, detail="Sign in to continue.")
     try:
         payload = jwt.decode(token, settings.jwt_secret, algorithms=["HS256"])
     except jwt.InvalidTokenError as exc:
         raise HTTPException(status_code=401, detail="Your session has expired. Sign in again.") from exc
-    user = await request.app.state.db.users.find_one({"id": payload.get("sub")})
+    user = await db.users.find_one({"id": payload.get("sub")})
     if not user:
         raise HTTPException(status_code=401, detail="Account not found.")
     return user
+
+
+async def current_user(
+    request: Request, authorization: str | None = Header(default=None)
+) -> dict:
+    return await user_from_token(request.app.state.db, parse_bearer_token(authorization))
 
 
 def require_role(*roles: str):
@@ -320,6 +364,16 @@ def ride_response(ride: dict, driver: dict | None = None) -> dict:
             "total": ride["fare"],
         },
     }
+    if ride.get("driver_location") and ride["status"] in ACTIVE_TRIP_STATUSES:
+        location = ride["driver_location"]
+        updated_at = location.get("updated_at")
+        result["driver_location"] = {
+            "latitude": location["latitude"],
+            "longitude": location["longitude"],
+            "updated_at": updated_at.isoformat() if isinstance(updated_at, datetime) else updated_at,
+        }
+    if ride.get("driver_id"):
+        result["driver_id"] = ride["driver_id"]
     if driver:
         result["driver_name"] = driver["name"]
         result["driver_rating"] = driver.get("rating_avg", 5.0)
@@ -327,6 +381,27 @@ def ride_response(ride: dict, driver: dict | None = None) -> dict:
         if driver.get("vehicle"):
             result["vehicle"] = driver["vehicle"]
     return result
+
+
+async def publish_ride(app_: FastAPI, ride: dict, driver: dict | None = None, notify_drivers: bool = False) -> None:
+    """Push a ride change to its rider, assigned driver and (optionally) online drivers.
+
+    Never raises: real-time delivery is best effort and must not fail the HTTP request.
+    """
+    try:
+        db = app_.state.db
+        hub: ConnectionHub = app_.state.hub
+        if driver is None and ride.get("driver_id"):
+            driver = await db.users.find_one({"id": ride["driver_id"]})
+        recipients = {ride.get("rider_id"), ride.get("driver_id")}
+        if notify_drivers:
+            driver_ids = hub.connected_driver_ids()
+            if driver_ids:
+                cursor = db.users.find({"id": {"$in": driver_ids}, "available": True}, {"id": 1})
+                recipients.update([doc["id"] async for doc in cursor])
+        await hub.send_to(recipients, {"type": "ride.updated", "ride": ride_response(ride, driver)})
+    except Exception:
+        logger.exception("Could not publish ride %s", ride.get("id"))
 
 
 def active_ride_filter(rider_id: str) -> dict:
@@ -615,6 +690,7 @@ async def request_ride(
     except Exception:
         await release_active_ride(request.app.state.db, user["id"], ride["id"])
         raise
+    await publish_ride(request.app, ride, notify_drivers=True)
     return {"ride": ride_response(ride), "checkout_url": None}
 
 
@@ -667,6 +743,7 @@ async def accept_ride(ride_id: str, request: Request, user: dict = Depends(requi
     )
     if not ride:
         raise HTTPException(status_code=409, detail="This trip is no longer available.")
+    await publish_ride(request.app, ride, user, notify_drivers=True)
     return ride_response(ride, user)
 
 
@@ -696,6 +773,7 @@ async def decline_ride(
             status_code=409,
             detail="Only newly accepted trips can be declined before heading to pickup.",
         )
+    await publish_ride(request.app, ride, notify_drivers=True)
     return ride_response(ride)
 
 
@@ -709,6 +787,7 @@ async def cancel_ride(ride_id: str, request: Request, user: dict = Depends(requi
     if not ride:
         raise HTTPException(status_code=409, detail="Only unassigned ride requests can be cancelled.")
     await release_active_ride(request.app.state.db, user["id"], ride_id)
+    await publish_ride(request.app, ride, notify_drivers=True)
     return ride_response(ride)
 
 
@@ -737,6 +816,7 @@ async def update_ride_status(
         raise HTTPException(status_code=409, detail="The ride status has already changed.")
     if updated["status"] == "completed" and updated.get("payment_status") == "paid":
         await release_active_ride(db, updated["rider_id"], ride_id)
+    await publish_ride(request.app, updated, user)
     return ride_response(updated, user)
 
 
@@ -827,6 +907,7 @@ async def rate_ride(
 
     updated_ride = await db.rides.find_one({"id": ride_id})
     driver_doc = await db.users.find_one({"id": driver_id}) if driver_id else None
+    await publish_ride(request.app, updated_ride, driver_doc)
     return ride_response(updated_ride, driver_doc)
 
 
@@ -887,4 +968,96 @@ async def stripe_webhook(request: Request, stripe_signature: str | None = Header
             )
             if ride["status"] == "completed":
                 await release_active_ride(request.app.state.db, ride["rider_id"], ride_id)
+            paid_ride = await request.app.state.db.rides.find_one({"id": ride_id})
+            if paid_ride:
+                await publish_ride(request.app, paid_ride)
     return {"received": True}
+
+
+WS_AUTH_TIMEOUT_SECONDS = 10
+WS_LOCATION_MIN_INTERVAL_SECONDS = 2
+
+
+@app.websocket("/api/ws")
+async def realtime(websocket: WebSocket):
+    await websocket.accept()
+    db = websocket.app.state.db
+    hub: ConnectionHub = websocket.app.state.hub
+    try:
+        message = await asyncio.wait_for(websocket.receive_json(), timeout=WS_AUTH_TIMEOUT_SECONDS)
+        token = message.get("token") if isinstance(message, dict) and message.get("type") == "auth" else None
+        user = await user_from_token(db, token)
+    except WebSocketDisconnect:
+        return
+    except (asyncio.TimeoutError, HTTPException, ValueError):
+        await close_quietly(websocket, 4401)
+        return
+
+    hub.connect(user, websocket)
+    last_location_at = 0.0
+    try:
+        await websocket.send_json({"type": "ready", "user_id": user["id"], "role": user["role"]})
+        while True:
+            try:
+                message = await websocket.receive_json()
+            except ValueError:
+                await websocket.send_json({"type": "error", "detail": "Messages must be JSON."})
+                continue
+            if not isinstance(message, dict):
+                continue
+            if message.get("type") == "ping":
+                await websocket.send_json({"type": "pong"})
+            elif message.get("type") == "location":
+                if user["role"] != "driver":
+                    await websocket.send_json({"type": "error", "detail": "Only drivers can share location."})
+                    continue
+                now = time.monotonic()
+                if now - last_location_at < WS_LOCATION_MIN_INTERVAL_SECONDS:
+                    continue
+                if await record_driver_location(websocket.app, user, message):
+                    last_location_at = now
+                else:
+                    await websocket.send_json({"type": "error", "detail": "Location could not be shared for that trip."})
+    except WebSocketDisconnect:
+        pass
+    finally:
+        hub.disconnect(user["id"], websocket)
+
+
+async def close_quietly(websocket: WebSocket, code: int) -> None:
+    try:
+        await websocket.close(code=code)
+    except Exception:
+        pass
+
+
+async def record_driver_location(app_: FastAPI, driver: dict, message: dict) -> bool:
+    ride_id = message.get("ride_id")
+    latitude = message.get("latitude")
+    longitude = message.get("longitude")
+    if not isinstance(ride_id, str):
+        return False
+    for value in (latitude, longitude):
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            return False
+    if not -90 <= latitude <= 90 or not -180 <= longitude <= 180:
+        return False
+    updated_at = utc_now()
+    ride = await app_.state.db.rides.find_one_and_update(
+        {"id": ride_id, "driver_id": driver["id"], "status": {"$in": ACTIVE_TRIP_STATUSES}},
+        {"$set": {"driver_location": {"latitude": latitude, "longitude": longitude, "updated_at": updated_at}}},
+        return_document=ReturnDocument.AFTER,
+    )
+    if not ride:
+        return False
+    await app_.state.hub.send_to(
+        [ride["rider_id"]],
+        {
+            "type": "driver.location",
+            "ride_id": ride_id,
+            "latitude": latitude,
+            "longitude": longitude,
+            "updated_at": updated_at.isoformat(),
+        },
+    )
+    return True

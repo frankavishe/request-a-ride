@@ -1,12 +1,15 @@
-import { useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import type { FormEvent, ReactNode } from 'react'
 import './App.css'
 
 const API_URL = import.meta.env.VITE_API_URL ?? 'http://localhost:8000'
 const MAPBOX_TOKEN = import.meta.env.VITE_MAPBOX_TOKEN
+const SOCKET_URL = `${API_URL.replace(/^http/, 'ws')}/api/ws`
 
 type RideStatus = 'requested' | 'accepted' | 'arriving' | 'in_progress' | 'completed' | 'cancelled'
 type TierKey = 'standard' | 'comfort' | 'xl' | 'green'
+
+const ACTIVE_TRIP_STATUSES: RideStatus[] = ['accepted', 'arriving', 'in_progress']
 
 type VehicleInfo = {
   make: string
@@ -31,6 +34,12 @@ type Place = {
   address: string
   latitude: number
   longitude: number
+}
+
+type DriverLocation = {
+  latitude: number
+  longitude: number
+  updated_at: string
 }
 
 type TierEstimate = {
@@ -64,7 +73,9 @@ type Ride = {
   tier?: TierKey
   tier_name?: string
   status: RideStatus
+  driver_id?: string
   driver_name?: string
+  driver_location?: DriverLocation
   driver_rating?: number
   driver_trips?: number
   vehicle?: VehicleInfo
@@ -74,6 +85,13 @@ type Ride = {
   feedback?: string
   itemized_fare?: ItemizedFare
 }
+
+type SocketEvent =
+  | { type: 'ready' }
+  | { type: 'pong' }
+  | { type: 'error'; detail: string }
+  | { type: 'ride.updated'; ride: Ride }
+  | ({ type: 'driver.location'; ride_id: string } & DriverLocation)
 
 async function request<T>(path: string, token?: string, options: RequestInit = {}): Promise<T> {
   const response = await fetch(`${API_URL}${path}`, {
@@ -87,6 +105,55 @@ async function request<T>(path: string, token?: string, options: RequestInit = {
   const body = await response.json().catch(() => ({}))
   if (!response.ok) throw new Error(body.detail ?? 'Something went wrong. Please try again.')
   return body as T
+}
+
+function useRideSocket(token: string, enabled: boolean, onEvent: (event: SocketEvent) => void) {
+  const [connected, setConnected] = useState(false)
+  const socketRef = useRef<WebSocket | null>(null)
+  const handler = useRef(onEvent)
+
+  useEffect(() => { handler.current = onEvent })
+
+  useEffect(() => {
+    if (!token || !enabled) return
+    let stopped = false
+    let retries = 0
+    let timer: number | null = null
+    const open = () => {
+      const socket = new WebSocket(SOCKET_URL)
+      socketRef.current = socket
+      socket.onopen = () => socket.send(JSON.stringify({ type: 'auth', token }))
+      socket.onmessage = message => {
+        let event: SocketEvent
+        try { event = JSON.parse(message.data) } catch { return }
+        if (event.type === 'ready') { retries = 0; setConnected(true) }
+        handler.current(event)
+      }
+      socket.onclose = event => {
+        if (socketRef.current === socket) socketRef.current = null
+        setConnected(false)
+        // 4401: the session was rejected, so retrying with the same token cannot succeed.
+        if (stopped || event.code === 4401) return
+        timer = window.setTimeout(open, Math.min(30000, 1000 * 2 ** retries++))
+      }
+    }
+    open()
+    return () => {
+      stopped = true
+      if (timer) window.clearTimeout(timer)
+      socketRef.current?.close()
+      socketRef.current = null
+    }
+  }, [token, enabled])
+
+  const send = useCallback((data: object) => {
+    const socket = socketRef.current
+    if (!socket || socket.readyState !== WebSocket.OPEN) return false
+    socket.send(JSON.stringify(data))
+    return true
+  }, [])
+
+  return { connected: connected && Boolean(token && enabled), send }
 }
 
 function Icon({ name, size = 19 }: { name: string; size?: number }) {
@@ -127,10 +194,19 @@ function Icon({ name, size = 19 }: { name: string; size?: number }) {
   )
 }
 
-function MapArt({ route = false, places }: { route?: boolean; places?: { pickup?: Place; dropoff?: Place } }) {
+function MapArt({
+  route = false,
+  places,
+  driver,
+}: {
+  route?: boolean
+  places?: { pickup?: Place; dropoff?: Place }
+  driver?: DriverLocation
+}) {
   const [mapFailed, setMapFailed] = useState(false)
+  const driverPin = driver ? `,pin-s-car+ffffff(${driver.longitude},${driver.latitude})` : ''
   const mapUrl = MAPBOX_TOKEN && places?.pickup && places?.dropoff
-    ? `https://api.mapbox.com/styles/v1/mapbox/dark-v11/static/pin-s+9dc45a(${places.pickup.longitude},${places.pickup.latitude}),pin-l+e69b66(${places.dropoff.longitude},${places.dropoff.latitude})/auto/1100x850@2x?access_token=${MAPBOX_TOKEN}`
+    ? `https://api.mapbox.com/styles/v1/mapbox/dark-v11/static/pin-s+9dc45a(${places.pickup.longitude},${places.pickup.latitude}),pin-l+e69b66(${places.dropoff.longitude},${places.dropoff.latitude})${driverPin}/auto/1100x850@2x?access_token=${MAPBOX_TOKEN}`
     : ''
   return (
     <div className={`map-art${mapUrl && !mapFailed ? ' map-has-static' : ''}`} aria-label="Map preview">
@@ -240,6 +316,40 @@ function App() {
   const searchTimer = useRef<number | null>(null)
   const searchVersion = useRef(0)
   const rideRefreshVersion = useRef(0)
+  const locationWarned = useRef(false)
+
+  const handleSocketEvent = (event: SocketEvent) => {
+    if (!profile) return
+    if (event.type === 'driver.location') {
+      const { ride_id: rideId, latitude, longitude, updated_at } = event
+      setRide(current => current?.id === rideId
+        ? { ...current, driver_location: { latitude, longitude, updated_at } }
+        : current)
+      return
+    }
+    if (event.type !== 'ride.updated') return
+    const updated = event.ride
+    if (profile.role === 'rider') {
+      setRide(current => {
+        if (updated.status === 'cancelled') return current?.id === updated.id ? null : current
+        return !current || current.id === updated.id || current.status === 'cancelled' ? updated : current
+      })
+      return
+    }
+    const mine = updated.driver_id === profile.id
+    setOpenRides(current => {
+      const rest = current.filter(item => item.id !== updated.id)
+      const keep = (mine && ACTIVE_TRIP_STATUSES.includes(updated.status)) ||
+        (updated.status === 'requested' && profile.available)
+      return keep ? [updated, ...rest] : rest
+    })
+    if (mine) setRide(updated)
+  }
+
+  const { connected, send } = useRideSocket(token, Boolean(profile), handleSocketEvent)
+  const driverTripId = profile?.role === 'driver'
+    ? openRides.find(item => ACTIVE_TRIP_STATUSES.includes(item.status))?.id
+    : undefined
 
   function logout() {
     localStorage.removeItem('waygo_token')
@@ -248,6 +358,7 @@ function App() {
     setRide(null)
     rideRefreshVersion.current++
     checkoutAttempted.current.clear()
+    locationWarned.current = false
     setCheckoutFailedRideId('')
     setPaymentUrl('')
   }
@@ -278,9 +389,10 @@ function App() {
       }
     }
     load()
-    const interval = window.setInterval(load, 15000)
+    // Live updates arrive over the socket; polling is a slower safety net while it is connected.
+    const interval = window.setInterval(load, connected ? 60000 : 15000)
     return () => { active = false; window.clearInterval(interval) }
-  }, [profile, token])
+  }, [profile, token, connected])
 
   useEffect(() => {
     if (!profile || profile.role !== 'rider') return
@@ -300,9 +412,34 @@ function App() {
       }
     }
     syncRide()
-    const interval = window.setInterval(syncRide, 5000)
+    const interval = window.setInterval(syncRide, connected ? 30000 : 5000)
     return () => { active = false; window.clearInterval(interval) }
-  }, [profile, token])
+  }, [profile, token, connected])
+
+  useEffect(() => {
+    if (!driverTripId || !connected || !('geolocation' in navigator)) return
+    let lastSent = 0
+    const watch = navigator.geolocation.watchPosition(
+      position => {
+        const now = Date.now()
+        if (now - lastSent < 5000) return
+        const sent = send({
+          type: 'location',
+          ride_id: driverTripId,
+          latitude: position.coords.latitude,
+          longitude: position.coords.longitude,
+        })
+        if (sent) lastSent = now
+      },
+      error => {
+        if (error.code !== error.PERMISSION_DENIED || locationWarned.current) return
+        locationWarned.current = true
+        setNotice('Allow location access so your rider can follow the trip.')
+      },
+      { enableHighAccuracy: true, maximumAge: 5000 },
+    )
+    return () => navigator.geolocation.clearWatch(watch)
+  }, [driverTripId, connected, send])
 
   useEffect(() => {
     if (
@@ -550,6 +687,9 @@ function App() {
           </button>
         </nav>
         <div className="top-user">
+          <span className={`live-status${connected ? ' is-live' : ''}`} role="status">
+            <span className="live-status-dot" /> {connected ? 'Live' : 'Reconnecting…'}
+          </span>
           <span className="avatar">{profile.name.charAt(0).toUpperCase()}</span>
           <span className="user-name">{profile.name.split(' ')[0]}</span>
           <button className="icon-button logout-button" onClick={logout} aria-label="Sign out">
@@ -649,6 +789,7 @@ function App() {
           <MapArt
             route={Boolean(estimate || displayedRide)}
             places={displayedRide ? { pickup: displayedRide.pickup, dropoff: displayedRide.dropoff } : places}
+            driver={displayedRide?.driver_location}
           />
           {estimate && !displayedRide && (
             <div className="estimate-float">
@@ -661,6 +802,11 @@ function App() {
               <span className="live-dot" /> TRIP {displayedRide.status.replace('_', ' ').toUpperCase()}
               <strong>{displayedRide.driver_name ?? 'Finding a driver'}</strong>
               {displayedRide.payment_status && <small>Payment · {displayedRide.payment_status}</small>}
+              {displayedRide.driver_location && (
+                <small>
+                  Driver located · {new Date(displayedRide.driver_location.updated_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })}
+                </small>
+              )}
             </div>
           )}
           <div className="map-controls">

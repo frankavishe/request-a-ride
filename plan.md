@@ -12,6 +12,8 @@ The workspace is empty. Build a Bolt-inspired transportation-request application
 4. **Phase 4 — Driver operations:** Implement driver availability, request acceptance, and ride status updates.
 5. **Phase 5 — Payments:** Integrate payment authorization/collection and ride payment state.
 6. **Phase 6 — Verification and handoff:** Test configuration established (`pytest.ini`), comprehensive API integration tests added (`backend/tests/test_api.py`), frontend build and lint verified clean, and all 30 backend test cases passing.
+7. **Phase 7 — Ride experience:** Ride tiers with itemized fares, driver vehicle profiles, driver decline, rider ratings with driver scores, and trip receipts.
+8. **Phase 8 — Real-time updates:** A WebSocket channel pushes ride changes to riders and online drivers and streams the assigned driver's GPS position to the rider, with polling kept as a slower fallback.
 
 Implement and verify each phase before starting the next, preserving a runnable application at every milestone. Reassess provider/configuration assumptions as each integration phase begins.
 
@@ -24,6 +26,8 @@ Implement and verify each phase before starting the next, preserving a runnable 
 - Phase 4: implemented driver availability, atomic ride acceptance, assigned-trip refresh, and guarded trip status transitions.
 - Phase 5: implemented hosted Stripe Checkout after driver acceptance and signature-verified payment webhooks.
 - Phase 6: added focused backend tests, local run instructions, provider/security configuration guidance, configured test execution environments with `pytest.ini` in root and backend, added comprehensive API integration tests (`backend/tests/test_api.py`), verified client build (`tsc -b && vite build`) and linting (`oxlint`) with 0 errors, and confirmed all 30 backend tests passing across auth, rides, drivers, security, and payment webhooks.
+- Phase 7: added Standard/Comfort/XL/Green tiers with itemized fares, driver vehicle details, decline before pickup, post-trip ratings that update driver averages, and receipts (`backend/tests/test_phase7.py`).
+- Phase 8: added an authenticated `/api/ws` WebSocket (token sent in the first message), an in-process connection hub, ride-change pushes from every ride mutation and the payment webhook, throttled driver location sharing saved on the ride, a reconnecting client with live/reconnecting indicator, driver `watchPosition` streaming, and a driver pin on the rider map. Polling slows to 30s/60s while the socket is live. Covered by `backend/tests/test_realtime.py` (38 backend tests passing).
 - The dependency installation blocker was resolved. All Phase gates (Foundation, Accounts, Rider, Driver, Payments, Handoff) are verified.
 
 ## Implementation outline
@@ -44,6 +48,8 @@ Implement and verify each phase before starting the next, preserving a runnable 
 - **Driver gate:** A driver can accept an available request and update its lifecycle; rider status reflects updates.
 - **Payments gate:** Payment flow is connected without exposing secrets; ride/payment state handles success and failure.
 - **Handoff gate:** Focused tests pass and setup, service credentials, and end-to-end flow are documented.
+- **Ride experience gate:** Riders choose a tier and see an itemized fare; drivers manage vehicle details and can decline; paid trips can be rated once.
+- **Real-time gate:** Requests, acceptance, status and payment changes reach the other party without waiting for a poll; the rider sees the assigned driver's live location; invalid sockets are rejected and a socket failure never fails an HTTP request.
 
 ## Assumptions and decisions
 
