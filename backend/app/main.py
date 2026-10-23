@@ -218,6 +218,78 @@ def ride_response(ride: dict, driver: dict | None = None) -> dict:
     return result
 
 
+def active_ride_filter(rider_id: str) -> dict:
+    return {
+        "rider_id": rider_id,
+        "$or": [
+            {"status": {"$in": ["requested", "accepted", "arriving", "in_progress"]}},
+            {"status": "completed", "payment_status": {"$ne": "paid"}},
+        ],
+    }
+
+
+def is_active_ride(ride: dict) -> bool:
+    return ride.get("status") in {"requested", "accepted", "arriving", "in_progress"} or (
+        ride.get("status") == "completed" and ride.get("payment_status") != "paid"
+    )
+
+
+async def release_active_ride(db, rider_id: str, ride_id: str) -> None:
+    await db.users.update_one(
+        {"id": rider_id, "active_ride_id": ride_id},
+        {"$unset": {"active_ride_id": "", "active_ride_reserved_at": ""}},
+    )
+
+
+async def reserve_active_ride(db, rider_id: str, ride_id: str) -> bool:
+    async def claim() -> bool:
+        result = await db.users.update_one(
+            {
+                "id": rider_id,
+                "$or": [
+                    {"active_ride_id": {"$exists": False}},
+                    {"active_ride_id": None},
+                ],
+            },
+            {"$set": {"active_ride_id": ride_id, "active_ride_reserved_at": utc_now()}},
+        )
+        return result.modified_count == 1
+
+    if await claim():
+        return True
+
+    reservation = await db.users.find_one(
+        {"id": rider_id}, {"active_ride_id": 1, "active_ride_reserved_at": 1}
+    )
+    if not reservation or not reservation.get("active_ride_id"):
+        return False
+
+    reserved_ride_id = reservation["active_ride_id"]
+    reserved_ride = await db.rides.find_one({"id": reserved_ride_id})
+    if reserved_ride and is_active_ride(reserved_ride):
+        return False
+
+    reserved_at = reservation.get("active_ride_reserved_at")
+    stale_reservation = reserved_ride is None and reserved_at and (
+        utc_now() - reserved_at
+    ).total_seconds() >= 60
+    if reserved_ride is None and not stale_reservation:
+        return False
+
+    if stale_reservation:
+        await db.users.update_one(
+            {
+                "id": rider_id,
+                "active_ride_id": reserved_ride_id,
+                "active_ride_reserved_at": reserved_at,
+            },
+            {"$unset": {"active_ride_id": "", "active_ride_reserved_at": ""}},
+        )
+    else:
+        await release_active_ride(db, rider_id, reserved_ride_id)
+    return await claim()
+
+
 def checkout_payment_matches_ride(session: dict, ride: dict) -> bool:
     metadata = session.get("metadata")
     if not isinstance(metadata, dict):
@@ -386,11 +458,7 @@ async def request_ride(
     user: dict = Depends(require_role("rider")),
 ):
     active = await request.app.state.db.rides.find_one({
-        "rider_id": user["id"],
-        "$or": [
-            {"status": {"$in": ["requested", "accepted", "arriving", "in_progress"]}},
-            {"status": "completed", "payment_status": {"$ne": "paid"}},
-        ],
+        **active_ride_filter(user["id"]),
     })
     if active:
         raise HTTPException(status_code=409, detail="Finish your current ride before requesting another.")
@@ -408,7 +476,13 @@ async def request_ride(
         "created_at": utc_now(),
         "updated_at": utc_now(),
     }
-    await request.app.state.db.rides.insert_one(ride)
+    if not await reserve_active_ride(request.app.state.db, user["id"], ride["id"]):
+        raise HTTPException(status_code=409, detail="Finish your current ride before requesting another.")
+    try:
+        await request.app.state.db.rides.insert_one(ride)
+    except Exception:
+        await release_active_ride(request.app.state.db, user["id"], ride["id"])
+        raise
     return {"ride": ride_response(ride), "checkout_url": None}
 
 
@@ -459,6 +533,7 @@ async def cancel_ride(ride_id: str, request: Request, user: dict = Depends(requi
     )
     if not ride:
         raise HTTPException(status_code=409, detail="Only unassigned ride requests can be cancelled.")
+    await release_active_ride(request.app.state.db, user["id"], ride_id)
     return ride_response(ride)
 
 
@@ -485,19 +560,15 @@ async def update_ride_status(
     )
     if not updated:
         raise HTTPException(status_code=409, detail="The ride status has already changed.")
+    if updated["status"] == "completed" and updated.get("payment_status") == "paid":
+        await release_active_ride(db, updated["rider_id"], ride_id)
     return ride_response(updated, user)
 
 
 @app.get("/api/rides/active")
 async def active_ride(request: Request, user: dict = Depends(require_role("rider"))):
     ride = await request.app.state.db.rides.find_one(
-        {
-            "rider_id": user["id"],
-            "$or": [
-                {"status": {"$in": ["requested", "accepted", "arriving", "in_progress"]}},
-                {"status": "completed", "payment_status": {"$ne": "paid"}},
-            ],
-        },
+        active_ride_filter(user["id"]),
         sort=[("created_at", -1)],
     )
     if not ride:
@@ -586,4 +657,6 @@ async def stripe_webhook(request: Request, stripe_signature: str | None = Header
                 {"id": ride_id, "payment_status": {"$ne": "paid"}},
                 {"$set": {"payment_status": "paid", "updated_at": utc_now()}},
             )
+            if ride["status"] == "completed":
+                await release_active_ride(request.app.state.db, ride["rider_id"], ride_id)
     return {"received": True}

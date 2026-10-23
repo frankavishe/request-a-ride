@@ -130,12 +130,17 @@ function App() {
   const [notice, setNotice] = useState('')
   const [busy, setBusy] = useState(false)
   const [paymentUrl, setPaymentUrl] = useState('')
+  const [checkoutFailedRideId, setCheckoutFailedRideId] = useState('')
+  const [checkoutRetryCount, setCheckoutRetryCount] = useState(0)
   const checkoutAttempted = useRef(new Set<string>())
   const searchTimer = useRef<number | null>(null)
   const searchVersion = useRef(0)
+  const rideRefreshVersion = useRef(0)
 
   function logout() {
     localStorage.removeItem('waygo_token'); setToken(''); setProfile(null); setRide(null)
+    rideRefreshVersion.current++
+    checkoutAttempted.current.clear(); setCheckoutFailedRideId(''); setPaymentUrl('')
   }
 
   useEffect(() => {
@@ -175,9 +180,10 @@ function App() {
     const syncRide = async () => {
       if (loading) return
       loading = true
+      const version = rideRefreshVersion.current
       try {
         const activeRide = await request<Ride | null>('/api/rides/active', token)
-        if (active) setRide(activeRide)
+        if (active && version === rideRefreshVersion.current) setRide(activeRide)
       } catch (error) {
         if (active) setNotice(error instanceof Error ? error.message : 'Could not refresh your ride.')
       } finally {
@@ -192,10 +198,15 @@ function App() {
   useEffect(() => {
     if (!profile || profile.role !== 'rider' || !ride || !['accepted', 'arriving', 'in_progress', 'completed'].includes(ride.status) || ride.payment_status === 'paid' || checkoutAttempted.current.has(ride.id)) return
     checkoutAttempted.current.add(ride.id)
+    setCheckoutFailedRideId('')
     request<{ url: string }>(`/api/rides/${ride.id}/checkout`, token, { method: 'POST' })
-      .then(result => setPaymentUrl(result.url))
-      .catch(error => setNotice(error instanceof Error ? error.message : 'Could not start payment checkout.'))
-  }, [profile, ride, token])
+      .then(result => { setPaymentUrl(result.url); setCheckoutFailedRideId('') })
+      .catch(error => {
+        checkoutAttempted.current.delete(ride.id)
+        setCheckoutFailedRideId(ride.id)
+        setNotice(error instanceof Error ? error.message : 'Could not start payment checkout.')
+      })
+  }, [profile, ride, token, checkoutRetryCount])
 
   useEffect(() => {
     if (!notice) return
@@ -205,6 +216,12 @@ function App() {
 
   function login(accessToken: string, user: Profile) {
     localStorage.setItem('waygo_token', accessToken); setToken(accessToken); setProfile(user)
+  }
+
+  function retryCheckout(rideId: string) {
+    checkoutAttempted.current.delete(rideId)
+    setCheckoutFailedRideId('')
+    setCheckoutRetryCount(count => count + 1)
   }
 
   async function searchPlaces(field: 'pickup' | 'dropoff', value: string) {
@@ -261,6 +278,7 @@ function App() {
     setBusy(true); setNotice('')
     try {
       const result = await request<{ ride: Ride; checkout_url?: string }>('/api/rides', token, { method: 'POST', body: JSON.stringify({ pickup: places.pickup, dropoff: places.dropoff }) })
+      rideRefreshVersion.current++
       setRide(result.ride)
       setNotice('Ride requested. You’ll be able to pay securely after a driver accepts.')
     } catch (error) { setNotice(error instanceof Error ? error.message : 'Ride request failed.') }
@@ -271,6 +289,7 @@ function App() {
     setBusy(true); setNotice('')
     try {
       await request(`/api/rides/${id}/cancel`, token, { method: 'POST' })
+      rideRefreshVersion.current++
       setRide(null); setPaymentUrl('')
       setNotice('Your unassigned ride request was cancelled.')
     } catch (error) { setNotice(error instanceof Error ? error.message : 'Could not cancel the ride request.') }
@@ -309,9 +328,9 @@ function App() {
           <span className="eyebrow muted">{isDriver ? 'DRIVER SPACE' : 'THE CITY IS YOURS'}</span>
           <h1>{isDriver ? <>Your next ride<br /><em>starts here.</em></> : <>Where to,<br /><em>{profile.name.split(' ')[0]}?</em></>}</h1>
           <p className="section-subtitle">{isDriver ? 'Good things happen when you get moving.' : 'The best routes start with you.'}</p>
-          {isDriver ? <DriverPanel rides={openRides} busy={busy} onToggle={async () => { try { const updated = await request<Profile>('/api/drivers/availability', token, { method: 'PATCH', body: JSON.stringify({ available: !profile.available }) }); setProfile(updated); setNotice(updated.available ? 'You’re online and ready for trips.' : 'You’re now offline.') } catch (error) { setNotice(error instanceof Error ? error.message : 'Could not update availability.')           } }} onAccept={id => driverAction(`/api/rides/${id}/accept`, 'POST')} onStatus={(id, status) => driverAction(`/api/rides/${id}/status`, 'PATCH', { status })} available={profile.available ?? false} /> : <RiderPanel pickup={pickup} dropoff={dropoff} estimate={estimate} ride={ride} suggestions={suggestions} paymentUrl={paymentUrl} busy={busy} onInput={searchPlaces} onChoose={choosePlace} onSwap={() => { setPickup(dropoff); setDropoff(pickup); setPlaces({ pickup: places.dropoff, dropoff: places.pickup }); setEstimate(null) }} onEstimate={getEstimate} onBook={bookRide} onCancel={cancelRide} onReset={() => { setRide(null); setPaymentUrl(''); setEstimate(null) }} /> }          <div className="trust-row"><span><Icon name="check" size={15} /> Upfront pricing</span><span><Icon name="check" size={15} /> Safe by design</span></div>
+          {isDriver ? <DriverPanel rides={openRides} busy={busy} onToggle={async () => { try { const updated = await request<Profile>('/api/drivers/availability', token, { method: 'PATCH', body: JSON.stringify({ available: !profile.available }) }); setProfile(updated); setNotice(updated.available ? 'You’re online and ready for trips.' : 'You’re now offline.') } catch (error) { setNotice(error instanceof Error ? error.message : 'Could not update availability.')           } }} onAccept={id => driverAction(`/api/rides/${id}/accept`, 'POST')} onStatus={(id, status) => driverAction(`/api/rides/${id}/status`, 'PATCH', { status })} available={profile.available ?? false} /> : <RiderPanel pickup={pickup} dropoff={dropoff} estimate={estimate} ride={ride} suggestions={suggestions} paymentUrl={paymentUrl} checkoutRetryAvailable={checkoutFailedRideId === ride?.id} onRetryCheckout={retryCheckout} busy={busy} onInput={searchPlaces} onChoose={choosePlace} onSwap={() => { setPickup(dropoff); setDropoff(pickup); setPlaces({ pickup: places.dropoff, dropoff: places.pickup }); setEstimate(null) }} onEstimate={getEstimate} onBook={bookRide} onCancel={cancelRide} onReset={() => { rideRefreshVersion.current++; setRide(null); setPaymentUrl(''); setEstimate(null); setCheckoutFailedRideId('') }} /> }          <div className="trust-row"><span><Icon name="check" size={15} /> Upfront pricing</span><span><Icon name="check" size={15} /> Safe by design</span></div>
         </section> : <ActivityPanel rides={history} loading={historyBusy} />}
-        <section className="map-panel"><MapArt route={Boolean(estimate || displayedRide)} places={displayedRide ? { pickup: displayedRide.pickup, dropoff: displayedRide.dropoff } : places} />{estimate && !displayedRide && <div className="estimate-float"><span><Icon name="clock" size={16} /> {estimate.duration_min} min</span><span>{estimate.distance_km} km</span></div>}{displayedRide && <div className="ride-float"><span className="live-dot" /> TRIP {displayedRide.status.replace('_', ' ').toUpperCase()}<strong>{displayedRide.driver_name ?? 'Finding a driver'}</strong>{displayedRide.payment_status && <small>Payment · {displayedRide.payment_status}</small>}</div>}<div className="map-controls"><button className="map-control" onClick={() => { setPlaces({}); setPickup(''); setDropoff(''); setEstimate(null); setRide(null); setPaymentUrl('') }} aria-label="Reset map"><Icon name="search" /></button><button className="map-control" onClick={locatePickup} aria-label="Use my current location"><Icon name="pin" /></button></div></section>
+        <section className="map-panel"><MapArt route={Boolean(estimate || displayedRide)} places={displayedRide ? { pickup: displayedRide.pickup, dropoff: displayedRide.dropoff } : places} />{estimate && !displayedRide && <div className="estimate-float"><span><Icon name="clock" size={16} /> {estimate.duration_min} min</span><span>{estimate.distance_km} km</span></div>}{displayedRide && <div className="ride-float"><span className="live-dot" /> TRIP {displayedRide.status.replace('_', ' ').toUpperCase()}<strong>{displayedRide.driver_name ?? 'Finding a driver'}</strong>{displayedRide.payment_status && <small>Payment · {displayedRide.payment_status}</small>}</div>}<div className="map-controls"><button className="map-control" onClick={() => { rideRefreshVersion.current++; setPlaces({}); setPickup(''); setDropoff(''); setEstimate(null); setRide(null); setPaymentUrl('') }} aria-label="Reset map"><Icon name="search" /></button><button className="map-control" onClick={locatePickup} aria-label="Use my current location"><Icon name="pin" /></button></div></section>
       </div>
       <footer className="app-footer"><span>Move freely. <span className="footer-accent">Go further.</span></span><span>© 2026 waygo. &nbsp;·&nbsp; Built for the way you move.</span></footer>
       {notice && <div className="toast" role="status">{notice}<button onClick={() => setNotice('')} aria-label="Dismiss">×</button></div>}
@@ -328,14 +347,15 @@ function ActivityPanel({ rides, loading }: { rides: Ride[]; loading: boolean }) 
   </section>
 }
 
-function RiderPanel({ pickup, dropoff, estimate, ride, suggestions, paymentUrl, busy, onInput, onChoose, onSwap, onEstimate, onBook, onCancel, onReset }: {
+function RiderPanel({ pickup, dropoff, estimate, ride, suggestions, paymentUrl, checkoutRetryAvailable, onRetryCheckout, busy, onInput, onChoose, onSwap, onEstimate, onBook, onCancel, onReset }: {
   pickup: string; dropoff: string; estimate: { distance_km: number; duration_min: number; fare: number } | null
   ride: Ride | null; suggestions: { field: 'pickup' | 'dropoff'; options: Place[] } | null
-  paymentUrl: string; busy: boolean; onInput: (field: 'pickup' | 'dropoff', value: string) => void
+  paymentUrl: string; checkoutRetryAvailable: boolean; onRetryCheckout: (id: string) => void
+  busy: boolean; onInput: (field: 'pickup' | 'dropoff', value: string) => void
   onChoose: (field: 'pickup' | 'dropoff', place: Place) => void; onSwap: () => void
   onEstimate: () => void; onBook: () => void; onCancel: (id: string) => void; onReset: () => void
 }) {
-  if (ride) return <div className="trip-card"><div className="trip-heading"><span className="live-dot" /><span>YOUR RIDE</span><b>{ride.status.replace('_', ' ')}</b></div><div className="trip-route"><div className="route-dots"><i /><span /><i /></div><div><strong>{ride.pickup.name}</strong><strong>{ride.dropoff.name}</strong></div></div><div className="trip-driver"><span className="driver-avatar"><Icon name="user" /></span><div><b>{ride.driver_name ?? 'Finding a driver'}</b><span>{ride.payment_status === 'paid' ? 'Payment complete' : ride.driver_name ? 'Your driver is on the way' : 'We’re matching you with a nearby driver'}</span></div><strong>£{ride.fare.toFixed(2)}</strong></div>{paymentUrl && ride.payment_status !== 'paid' && <a className="button button-primary checkout-button" href={paymentUrl}>Continue to secure payment <Icon name="arrow" /></a>}{ride.status === 'requested' ? <button className="text-button trip-done" disabled={busy} onClick={() => onCancel(ride.id)}>Cancel ride request</button> : ride.status === 'completed' && ride.payment_status === 'paid' ? <button className="text-button trip-done" onClick={onReset}>Request another ride</button> : <p className="trip-waiting">{ride.status === 'completed' ? 'Complete your payment to finish this trip.' : 'You can request another ride after this trip is complete.'}</p>}</div>
+  if (ride) return <div className="trip-card"><div className="trip-heading"><span className="live-dot" /><span>YOUR RIDE</span><b>{ride.status.replace('_', ' ')}</b></div><div className="trip-route"><div className="route-dots"><i /><span /><i /></div><div><strong>{ride.pickup.name}</strong><strong>{ride.dropoff.name}</strong></div></div><div className="trip-driver"><span className="driver-avatar"><Icon name="user" /></span><div><b>{ride.driver_name ?? 'Finding a driver'}</b><span>{ride.payment_status === 'paid' ? 'Payment complete' : ride.driver_name ? 'Your driver is on the way' : 'We’re matching you with a nearby driver'}</span></div><strong>£{ride.fare.toFixed(2)}</strong></div>{paymentUrl && ride.payment_status !== 'paid' && <a className="button button-primary checkout-button" href={paymentUrl}>Continue to secure payment <Icon name="arrow" /></a>}{checkoutRetryAvailable && ride.payment_status !== 'paid' && <button className="button button-primary checkout-button" onClick={() => onRetryCheckout(ride.id)}>Retry secure payment <Icon name="arrow" /></button>}{ride.status === 'requested' ? <button className="text-button trip-done" disabled={busy} onClick={() => onCancel(ride.id)}>Cancel ride request</button> : ride.status === 'completed' && ride.payment_status === 'paid' ? <button className="text-button trip-done" onClick={onReset}>Request another ride</button> : <p className="trip-waiting">{ride.status === 'completed' ? 'Complete your payment to finish this trip.' : 'You can request another ride after this trip is complete.'}</p>}</div>
   return <div className="ride-form">
     <div className="location-inputs"><div className="input-icons"><span className="origin-dot" /><span className="connector" /><span className="destination-pin"><Icon name="pin" size={17} /></span></div><div className="place-fields"><div className="place-wrap"><input aria-label="Pickup location" placeholder="Pickup location" value={pickup} onChange={event => onInput('pickup', event.target.value)} autoComplete="off" />{suggestions?.field === 'pickup' && <PlaceSuggestions options={suggestions.options} onChoose={place => onChoose('pickup', place)} />}</div><div className="input-divider" /><div className="place-wrap"><input aria-label="Where to" placeholder="Where to?" value={dropoff} onChange={event => onInput('dropoff', event.target.value)} autoComplete="off" />{suggestions?.field === 'dropoff' && <PlaceSuggestions options={suggestions.options} onChoose={place => onChoose('dropoff', place)} />}</div></div><button className="swap-button" onClick={onSwap} aria-label="Swap locations"><Icon name="swap" /></button></div>
     {!MAPBOX_TOKEN && <div className="provider-note"><span>i</span><span>Configure <code>VITE_MAPBOX_TOKEN</code> and backend <code>MAPBOX_ACCESS_TOKEN</code> to search and map places.</span></div>}

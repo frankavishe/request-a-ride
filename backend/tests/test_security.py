@@ -1,5 +1,8 @@
-﻿import jwt
+﻿import asyncio
+
+import jwt
 import pytest
+from fastapi import HTTPException
 from pydantic import ValidationError
 
 from app.main import (
@@ -9,6 +12,7 @@ from app.main import (
     parse_bearer_token,
     password_hash,
     password_matches,
+    require_role,
     settings,
 )
 
@@ -45,6 +49,13 @@ def test_bearer_tokens_are_parsed_case_insensitively_and_trimmed():
     assert parse_bearer_token("bearer   token-456") == "token-456"
     assert parse_bearer_token("Token token-789") is None
     assert parse_bearer_token("Bearer   ") is None
+
+
+def test_role_guard_rejects_users_with_the_wrong_role():
+    with pytest.raises(HTTPException) as issue:
+        asyncio.run(require_role("driver")({"role": "rider"}))
+
+    assert issue.value.status_code == 403
 
 
 def test_checkout_payment_matches_precision_and_rounding():
